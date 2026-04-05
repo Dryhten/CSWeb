@@ -92,6 +92,9 @@ router.post('/rooms', auth, async (req, res) => {
     if (!['pvp', 'pve', '1v1'].includes(mode)) mode = 'pvp';
     const maxPlayers = mode === '1v1' ? 2 : Math.min(16, Math.max(2, Number(settings?.maxPlayers) || 10));
 
+    let roundTime = Number(settings?.roundTime);
+    if (!Number.isFinite(roundTime) || roundTime < 60 || roundTime > 600) roundTime = 120;
+
     const room = new Room({
       roomId,
       name: name.substring(0, 30),
@@ -101,8 +104,8 @@ router.post('/rooms', auth, async (req, res) => {
         mode,
         map: settings?.map || 'desert',
         maxPlayers,
-        roundTime: settings?.roundTime || 120,
-        winScore: mode === '1v1' ? Math.min(16, Number(settings?.winScore) || 8) : (settings?.winScore || 16),
+        roundTime: Math.floor(roundTime),
+        winScore: mode === '1v1' ? 8 : (settings?.winScore || 16),
         friendlyFire: settings?.friendlyFire || false
       },
       players: [{
@@ -110,9 +113,9 @@ router.post('/rooms', auth, async (req, res) => {
         playerId: req.player._id,
         nickname: req.player.nickname,
         team: 'CT',
-        isReady: true,
+        isReady: false,
         isHost: true,
-        stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0 }
+        stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0, headshots: 0 }
       }],
       gameState: {
         status: 'waiting',
@@ -213,7 +216,16 @@ router.post('/join/:roomId', auth, async (req, res) => {
     const humanT = room.players.filter(p => !isBot(p) && p.team === 'T').length;
 
     let team;
-    if (room.settings.mode === '1v1') {
+    if (room.settings.mode === 'pve') {
+      if (bodyTeam === 'T') {
+        return res.status(400).json({ error: 'PVE 请加入反恐小队' });
+      }
+      const maxSquad = Math.max(1, Number(room.settings.maxPlayers) || 10);
+      if (humanCount >= maxSquad) {
+        return res.status(400).json({ error: '小队已满' });
+      }
+      team = 'CT';
+    } else if (room.settings.mode === '1v1') {
       team = humanCT <= humanT ? 'CT' : 'T';
     } else if (bodyTeam === 'CT' || bodyTeam === 'T') {
       if (bodyTeam === 'CT' && humanCT >= maxPerTeam) {
@@ -241,7 +253,7 @@ router.post('/join/:roomId', auth, async (req, res) => {
       team,
       isReady: false,
       isHost: false,
-      stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0 }
+      stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0, headshots: 0 }
     });
 
     rebalanceRoomBots(room);
@@ -333,8 +345,16 @@ router.put('/room/:roomId/settings', auth, async (req, res) => {
     const { settings } = req.body;
     if (settings) {
       room.settings = { ...room.settings.toObject(), ...settings };
+      if (room.settings.roundTime != null) {
+        const rt = Number(room.settings.roundTime);
+        if (!Number.isFinite(rt) || rt < 60 || rt > 600) {
+          return res.status(400).json({ error: '回合时长需在 60–600 秒之间' });
+        }
+        room.settings.roundTime = Math.floor(rt);
+      }
       if (room.settings.mode === '1v1') {
         room.settings.maxPlayers = 2;
+        room.settings.winScore = 8;
         const humans = room.players.filter(p => !isBot(p));
         if (humans.length > 2) {
           return res.status(400).json({ error: '1v1 仅支持 2 名真人，请先请离多余玩家' });

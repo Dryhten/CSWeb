@@ -27,7 +27,8 @@ const playerInRoomSchema = new mongoose.Schema({
     deaths: { type: Number, default: 0 },
     score: { type: Number, default: 0 },
     mvps: { type: Number, default: 0 },
-    damage: { type: Number, default: 0 }
+    damage: { type: Number, default: 0 },
+    headshots: { type: Number, default: 0 }
   }
 }, { _id: false });
 
@@ -99,6 +100,8 @@ const roomSchema = new mongoose.Schema({
       default: 0
     },
     startTime: Date,
+    /** 1v1：当前回合开始时刻（中途加入者与本回合倒计时对齐）；开局与每回合结算后更新 */
+    roundStartTime: Date,
     endTime: Date
   },
   createdAt: {

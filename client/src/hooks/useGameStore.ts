@@ -68,7 +68,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
       currentRoom: roomResponse.data,
       isInRoom: true,
       isHost: true,
-      isReady: true
+      isReady: false
     });
     return roomId;
   },

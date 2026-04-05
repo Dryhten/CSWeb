@@ -544,10 +544,12 @@ export function cloneAvatarForRemotePlayer(scene, socketId) {
   if(!localPlayerAvatar || !scene) return null;
   const clone = SkeletonUtils.clone(localPlayerAvatar);
   clone.visible = true;
+  delete clone.userData.isLocalPlayerAvatar;
   clone.userData.remoteSocketId = socketId;
   clone.userData.isRemotePlayerAvatar = true;
   clone.traverse((ch) => {
     if(!ch.isMesh) return;
+    ch.visible = true;
     const ud = ch.userData || (ch.userData = {});
     if(ud.bodyPart) return;
     const n = ch.name || '';

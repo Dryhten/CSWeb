@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useGameStore } from '../hooks/useGameStore';
 import socketService, { normalizeRoomId } from '../services/socket';
 import { lobbyApi } from '../services/api';
+import type { Room } from '../types';
 import './styles/game.css';
 
 export default function Game() {
@@ -87,14 +88,28 @@ export default function Game() {
           team: p.team,
           isHost: p.isHost,
           isBot: p.nickname.startsWith('_bot_'),
+          stats: p.stats
+            ? {
+                kills: Number(p.stats.kills) || 0,
+                deaths: Number(p.stats.deaths) || 0,
+                score: Number(p.stats.score) || 0,
+                mvps: Number(p.stats.mvps) || 0,
+                damage: Math.round(Number(p.stats.damage) || 0),
+                headshots: Number(p.stats.headshots) || 0,
+              }
+            : { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0, headshots: 0 },
         })),
         gameState: {
           ...currentRoom.gameState,
           status: currentRoom.gameState?.status ?? 'playing',
+          startTime: currentRoom.gameState?.startTime,
+          roundStartTime: currentRoom.gameState?.roundStartTime,
+          endTime: currentRoom.gameState?.endTime,
         },
         settings: {
           ...(currentRoom.settings ?? {}),
           mode: currentRoom.settings?.mode ?? 'pvp',
+          roundTime: currentRoom.settings?.roundTime ?? 120,
         },
       };
       w.postMessage(gameData, '*');
@@ -130,6 +145,77 @@ export default function Game() {
     };
   }, [allowPlay, gateChecked, currentRoom]);
 
+  /** 对局页仍订阅房间事件，刷新 players.odId 等，iframe init 与计时锚点一致 */
+  useEffect(() => {
+    if (!allowPlay || !gateChecked || !currentRoom?.roomId) return;
+    const roomIdNorm = normalizeRoomId(currentRoom.roomId);
+
+    const sameRoom = () => {
+      const r = useGameStore.getState().currentRoom;
+      return r && normalizeRoomId(r.roomId) === roomIdNorm;
+    };
+
+    const handlePlayerJoined = (data: { players?: Room['players'] }) => {
+      if (!sameRoom() || !data.players) return;
+      const room = useGameStore.getState().currentRoom!;
+      useGameStore.getState().updateRoom({ ...room, players: data.players } as Room);
+    };
+    const handlePlayerLeft = handlePlayerJoined;
+    const handlePlayerReady = handlePlayerJoined;
+    const handleTeamChanged = handlePlayerJoined;
+
+    const handleGameStarted = (data: {
+      settings?: Room['settings'];
+      gameState?: Partial<Room['gameState']>;
+      round?: number;
+    }) => {
+      if (!sameRoom()) return;
+      const room = useGameStore.getState().currentRoom!;
+      const gs = data.gameState;
+      useGameStore.getState().updateRoom({
+        ...room,
+        settings: data.settings || room.settings,
+        gameState: gs
+          ? {
+              ...room.gameState,
+              status: gs.status ?? 'playing',
+              round: gs.round ?? data.round ?? room.gameState.round,
+              ctScore: gs.ctScore ?? room.gameState.ctScore,
+              tScore: gs.tScore ?? room.gameState.tScore,
+              startTime: gs.startTime ?? room.gameState.startTime,
+              roundStartTime: gs.roundStartTime ?? room.gameState.roundStartTime,
+              endTime: gs.endTime ?? room.gameState.endTime,
+            }
+          : { ...room.gameState, status: 'playing', round: data.round ?? 1 },
+      } as Room);
+    };
+
+    const handleGameStateUpdated = (data: { gameState?: Partial<Room['gameState']> }) => {
+      if (!sameRoom() || !data.gameState) return;
+      const room = useGameStore.getState().currentRoom!;
+      useGameStore.getState().updateRoom({
+        ...room,
+        gameState: { ...room.gameState, ...data.gameState },
+      } as Room);
+    };
+
+    socketService.on('room:playerJoined', handlePlayerJoined);
+    socketService.on('room:playerLeft', handlePlayerLeft);
+    socketService.on('room:playerReady', handlePlayerReady);
+    socketService.on('room:teamChanged', handleTeamChanged);
+    socketService.on('game:started', handleGameStarted);
+    socketService.on('room:gameStateUpdated', handleGameStateUpdated);
+
+    return () => {
+      socketService.off('room:playerJoined', handlePlayerJoined);
+      socketService.off('room:playerLeft', handlePlayerLeft);
+      socketService.off('room:playerReady', handlePlayerReady);
+      socketService.off('room:teamChanged', handleTeamChanged);
+      socketService.off('game:started', handleGameStarted);
+      socketService.off('room:gameStateUpdated', handleGameStateUpdated);
+    };
+  }, [allowPlay, gateChecked, currentRoom?.roomId]);
+
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'quit-game') {
@@ -158,6 +244,86 @@ export default function Game() {
 
     const roomIdNorm = normalizeRoomId(roomId);
     let lastSelfEmit = 0;
+
+    const sameRoom = () => {
+      const r = useGameStore.getState().currentRoom;
+      return !!(r && normalizeRoomId(r.roomId) === roomIdNorm);
+    };
+
+    const onRoundEnded = (data: {
+      winner?: string;
+      round?: number;
+      ctScore?: number;
+      tScore?: number;
+      roundStartTime?: string | Date;
+    }) => {
+      if (!sameRoom()) return;
+      iframe.contentWindow?.postMessage(
+        {
+          type: 'mp-1v1-round-ended',
+          winner: data.winner,
+          round: data.round,
+          ctScore: data.ctScore,
+          tScore: data.tScore,
+          roundStartTime: data.roundStartTime,
+        },
+        '*'
+      );
+      const room = useGameStore.getState().currentRoom!;
+      useGameStore.getState().updateRoom({
+        ...room,
+        gameState: {
+          ...room.gameState,
+          round: data.round ?? room.gameState.round,
+          ctScore: data.ctScore ?? room.gameState.ctScore,
+          tScore: data.tScore ?? room.gameState.tScore,
+          ...(data.roundStartTime != null
+            ? { roundStartTime: data.roundStartTime }
+            : {}),
+        },
+      } as Room);
+    };
+
+    const onGameEnded = (data: {
+      winner?: string;
+      ctScore?: number;
+      tScore?: number;
+      reason?: string;
+      players?: Array<{
+        odId?: string;
+        playerId?: string;
+        nickname?: string;
+        team?: string;
+        kills?: number;
+        deaths?: number;
+        score?: number;
+        damage?: number;
+        mvps?: number;
+      }>;
+    }) => {
+      if (!sameRoom()) return;
+      iframe.contentWindow?.postMessage(
+        {
+          type: 'mp-1v1-match-ended',
+          winner: data.winner,
+          ctScore: data.ctScore,
+          tScore: data.tScore,
+          reason: data.reason,
+          players: data.players,
+        },
+        '*'
+      );
+      const room = useGameStore.getState().currentRoom!;
+      useGameStore.getState().updateRoom({
+        ...room,
+        gameState: {
+          ...room.gameState,
+          status: 'ended',
+          ctScore: data.ctScore ?? room.gameState.ctScore,
+          tScore: data.tScore ?? room.gameState.tScore,
+        },
+      } as Room);
+    };
 
     const onIframeMessage = (event: MessageEvent) => {
       if (event.source !== iframe.contentWindow) return;
@@ -217,6 +383,17 @@ export default function Game() {
         const rid = event.data?.roomId as string | undefined;
         if (!rid || normalizeRoomId(rid) !== roomIdNorm) return;
         socketService.sendSpawnProtectShoot(roomId);
+        return;
+      }
+      if (t === 'mp-round-timeup') {
+        const rid = (event.data as { roomId?: string }).roomId;
+        if (!rid || normalizeRoomId(rid) !== roomIdNorm) return;
+        const r = useGameStore.getState().currentRoom;
+        if (!r || normalizeRoomId(r.roomId) !== roomIdNorm) return;
+        const myPid = localStorage.getItem('playerId');
+        const me = r.players.find((p) => p.playerId != null && String(p.playerId) === String(myPid));
+        if (!me?.isHost) return;
+        socketService.sendRoundTimeUp(roomId);
       }
     };
 
@@ -267,17 +444,29 @@ export default function Game() {
       );
     };
 
+    const on1v1Overtime = (data: { roomId?: string }) => {
+      if (!sameRoom()) return;
+      if (data?.roomId != null && normalizeRoomId(String(data.roomId)) !== roomIdNorm) return;
+      iframe.contentWindow?.postMessage({ type: 'mp-1v1-overtime' }, '*');
+    };
+
     window.addEventListener('message', onIframeMessage);
     socketService.on('game:playerMoved', onPlayerMoved);
     socketService.on('game:playerHit', onPlayerHit);
     socketService.on('game:playerRespawned', onPlayerRespawned);
     socketService.on('game:spawnProtectEnd', onSpawnProtectEnd);
+    socketService.on('game:1v1Overtime', on1v1Overtime);
+    socketService.on('game:roundEnded', onRoundEnded);
+    socketService.on('game:ended', onGameEnded);
     return () => {
       window.removeEventListener('message', onIframeMessage);
       socketService.off('game:playerMoved', onPlayerMoved);
       socketService.off('game:playerHit', onPlayerHit);
       socketService.off('game:playerRespawned', onPlayerRespawned);
       socketService.off('game:spawnProtectEnd', onSpawnProtectEnd);
+      socketService.off('game:1v1Overtime', on1v1Overtime);
+      socketService.off('game:roundEnded', onRoundEnded);
+      socketService.off('game:ended', onGameEnded);
     };
   }, [allowPlay, currentRoom?.roomId]);
 

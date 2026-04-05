@@ -17,6 +17,33 @@ const roomBots = require('./services/roomBots');
 const app = express();
 const server = http.createServer(app);
 
+const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');
+
+/**
+ * 静态资源缓存：地图/模型/音频等大文件允许长期缓存，减少重复下载；HTML 不缓存以便发版即时生效。
+ * 带内容哈希的 JS/CSS 使用 immutable。
+ */
+function staticSetHeaders(res, resourcePath) {
+  const normalized = resourcePath.replace(/\\/g, '/').toLowerCase();
+  const base = path.basename(normalized);
+  if (base.endsWith('.html')) {
+    res.setHeader('Cache-Control', 'no-cache');
+    return;
+  }
+  const hashedBundled = /\/assets\/[^/]+-[a-f0-9]{8,}\.(js|mjs|css)$/i.test(normalized);
+  if (hashedBundled) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    return;
+  }
+  const heavyStatic =
+    /\.(glb|gltf|bin|ktx2|mp3|ogg|wav|opus|webp|png|jpe?g|gif|svg|ico|woff2?)$/i.test(base) ||
+    normalized.includes('/assets/models/') ||
+    normalized.includes('/assets/sounds/');
+  if (heavyStatic) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000');
+  }
+}
+
 // Socket.io setup
 const io = new Server(server, {
   cors: {
@@ -30,8 +57,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Static files - serve React build
-app.use(express.static('../client/dist'));
+// Static files - serve React build（大资源长期 HTTP 缓存，由浏览器磁盘缓存）
+app.use(express.static(CLIENT_DIST, { setHeaders: staticSetHeaders }));
 
 // API Routes
 app.use('/api/auth', authRoutes);
@@ -50,7 +77,7 @@ roomBots.setIo(io);
 
 // SPA fallback - serve index.html for all non-API routes
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../../client/dist/index.html'));
+  res.sendFile(path.join(CLIENT_DIST, 'index.html'));
 });
 
 // Database connection

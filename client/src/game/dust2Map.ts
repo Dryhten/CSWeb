@@ -613,6 +613,8 @@ export async function loadDust2GlbMap(
     rotationY?: number;
     /** 在合并碰撞网格前，把模型整体上移/下移使包围盒底面落在 y=0 */
     alignMinYToZero?: boolean;
+    /** ratio 0~1，phase 为当前阶段说明（用于 UI） */
+    onProgress?: (ratio: number, phase: string) => void;
   }
 ): Promise<Dust2LoadResult> {
   ensureMeshBVHPrototypes();
@@ -621,13 +623,27 @@ export async function loadDust2GlbMap(
   const rotationY = opts.rotationY != null ? opts.rotationY : 0;
   const alignMinYToZero = opts.alignMinYToZero !== false;
 
+  const report = (ratio: number, phase: string) => {
+    if(opts.onProgress) opts.onProgress(Math.min(1, Math.max(0, ratio)), phase);
+  };
+
   const loader = new GLTFLoader();
-  const gltf = await loader.loadAsync(opts.url);
+  report(0.02, '连接资源…');
+  const gltf = await loader.loadAsync(opts.url, (event) => {
+    if(event.lengthComputable && event.total > 0) {
+      const dl = event.loaded / event.total;
+      report(0.05 + dl * 0.62, '下载地图…');
+    } else {
+      report(0.35, '下载地图…');
+    }
+  });
+  report(0.7, '解析模型…');
   const visualRoot = gltf.scene;
   visualRoot.scale.setScalar(scale);
   visualRoot.position.set(pos[0], pos[1], pos[2]);
   visualRoot.rotation.y = rotationY;
   visualRoot.updateMatrixWorld(true);
+  report(0.74, '对齐地形…');
 
   if(alignMinYToZero) {
     try {
@@ -641,6 +657,7 @@ export async function loadDust2GlbMap(
     }
   }
 
+  report(0.78, '提取碰撞几何…');
   const geoms = collectVisibleCollisionGeometries(visualRoot);
 
   if(geoms.length === 0) {
@@ -653,6 +670,7 @@ export async function loadDust2GlbMap(
   }
   console.log('[dust2] 碰撞总面数:', totalTris);
 
+  report(0.84, '合并碰撞网格…');
   const merged = mergeCollisionGeometries(geoms);
   merged.computeVertexNormals();
 
@@ -667,7 +685,9 @@ export async function loadDust2GlbMap(
   collisionMesh.visible = false;
   collisionMesh.frustumCulled = false;
 
+  report(0.9, '构建加速结构…');
   merged.computeBoundsTree({ maxLeafTris: 10, verbose: false });
+  report(0.98, '完成场景…');
 
   const posAttr = merged.attributes.position;
   let boundsMin = new THREE.Vector3(Infinity, Infinity, Infinity);
@@ -697,5 +717,6 @@ export async function loadDust2GlbMap(
     }
   }
 
+  report(1, '就绪');
   return { visualRoot, collisionMesh, bounds };
 }

@@ -15,6 +15,7 @@
     "build:client": "npm run build -w @client/fire-assault",
     "preview:client": "npm run preview -w @client/fire-assault",
     "lint": "npm run lint -w @client/fire-assault",
+    "fix:client-rollup": "npm install -w @client/fire-assault",
     "start": "npm run build && npm run start -w @server/fire-assault"
   },
   "devDependencies": {

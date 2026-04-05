@@ -136,6 +136,11 @@ class SocketService {
     this.emit('room:switchTeam', { roomId: rid, team });
   }
 
+  sendRoomChat(roomId: string, text: string) {
+    const rid = normalizeRoomId(roomId);
+    this.emit('room:chat', { roomId: rid, text });
+  }
+
   startGame(roomId: string) {
     const rid = normalizeRoomId(roomId);
     this.emit('game:start', { roomId: rid });
@@ -225,6 +230,12 @@ class SocketService {
   sendRoundEnd(roomId: string, winner: string) {
     const rid = normalizeRoomId(roomId);
     this.emit('game:roundEnd', { roomId: rid, winner });
+  }
+
+  /** 1v1 回合时间到：仅应由房主调用，服务端校验 */
+  sendRoundTimeUp(roomId: string) {
+    const rid = normalizeRoomId(roomId);
+    this.emit('game:roundTimeUp', { roomId: rid });
   }
 
   get id() {

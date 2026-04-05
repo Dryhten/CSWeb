@@ -25,6 +25,23 @@ canvas{display:block}
 #damage-overlay{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:90;
   background:radial-gradient(ellipse at center,transparent 50%,rgba(255,0,0,0.0) 100%);opacity:0;transition:opacity 0.1s}
 
+/* === MAP LOADING（GLB 下载 + BVH 构建） === */
+#map-loading-overlay{position:fixed;inset:0;z-index:3000;display:none;flex-direction:column;align-items:center;justify-content:center;
+  background:radial-gradient(ellipse 120% 80% at 50% 40%,#121218 0%,#050508 65%,#000 100%);pointer-events:auto}
+#map-loading-overlay .map-loading-panel{
+  width:min(420px,88vw);padding:28px 32px 26px;
+  background:linear-gradient(165deg,rgba(22,22,30,0.97) 0%,rgba(10,10,14,0.98) 100%);
+  border:1px solid rgba(255,106,0,0.35);border-radius:4px;
+  box-shadow:0 0 0 1px rgba(0,0,0,0.5),0 24px 48px rgba(0,0,0,0.65),inset 0 1px 0 rgba(255,255,255,0.04)}
+#map-loading-overlay .map-loading-title{font-family:'Orbitron',sans-serif;font-size:13px;font-weight:700;letter-spacing:6px;color:rgba(255,255,255,0.88);
+  text-align:center;margin-bottom:18px;text-transform:uppercase}
+#map-loading-overlay #map-loading-label{font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:600;color:rgba(255,230,210,0.82);text-align:center;margin-bottom:14px;min-height:1.4em}
+#map-loading-bar-wrap{width:100%;height:10px;background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.08);border-radius:2px;overflow:hidden;position:relative}
+#map-loading-bar-fill{height:100%;width:0%;background:linear-gradient(90deg,#cc5200,var(--hud-orange),#ff9a4a);transition:width 0.12s ease-out;
+  box-shadow:0 0 12px rgba(255,106,0,0.35)}
+#map-loading-overlay .map-loading-meta{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-family:'Rajdhani',sans-serif;font-size:12px;color:rgba(255,255,255,0.45)}
+#map-loading-pct{font-family:'Orbitron',monospace;font-size:12px;color:var(--hud-orange);letter-spacing:1px}
+
 /* === KILL FEED === */
 #kill-feed{position:fixed;top:80px;right:20px;z-index:100;pointer-events:none;display:flex;flex-direction:column;gap:4px}
 .kill-msg{background:rgba(0,0,0,0.7);border-left:3px solid var(--hud-orange);padding:6px 14px;font-size:13px;
@@ -51,6 +68,25 @@ canvas{display:block}
 #health-text{font-family:'Orbitron';font-size:28px;font-weight:900;color:var(--text-bright);margin-top:2px;letter-spacing:1px}
 #health-text span{font-size:14px;color:rgba(255,255,255,0.4);margin-left:4px}
 
+/* 世界坐标调试：紧贴血条右侧、同底对齐 */
+#dev-spawn-hud{
+  display:none;
+  position:fixed;
+  bottom:20px;
+  left:calc(20px + 220px + 14px);
+  z-index:101;
+  pointer-events:none;
+  font-family:'Orbitron','Rajdhani',sans-serif;
+  font-size:11px;
+  color:rgba(220,235,255,0.95);
+  text-shadow:0 1px 4px rgba(0,0,0,0.95);
+  background:rgba(8,10,18,0.72);
+  padding:10px 12px;
+  border-radius:6px;
+  border:1px solid rgba(0,176,255,0.28);
+  line-height:1.5;
+  max-width:min(calc(100vw - 280px),420px)}
+
 /* === AMMO DISPLAY === */
 #ammo-container{position:fixed;bottom:20px;right:20px;z-index:100;text-align:right}
 #weapon-name{font-family:'Orbitron';font-size:11px;font-weight:500;color:var(--hud-orange);letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}
@@ -68,32 +104,110 @@ canvas{display:block}
 .weapon-slot .slot-num{position:absolute;top:2px;left:5px;font-size:9px;color:rgba(255,255,255,0.3)}
 .weapon-slot.active .slot-num{color:var(--hud-orange)}
 
-/* === PVP MATCH TIMER（CS:GO 风格顶栏倒计时） === */
+/* === PVP 顶栏：CS:GO 式  CT 分 | 时间 | T 分 === */
 #pvp-match-timer-wrap{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:100;
-  display:none;flex-direction:column;align-items:center;gap:2px;pointer-events:none}
+  display:none;flex-direction:column;align-items:center;pointer-events:none}
 #pvp-match-timer-wrap.visible{display:flex}
-.pvp-timer-bar{
-  min-width:148px;padding:5px 18px 7px;
-  background:linear-gradient(180deg,rgba(16,16,22,0.94) 0%,rgba(8,8,12,0.9) 100%);
-  border:1px solid rgba(255,255,255,0.1);
+.pvp-top-hud{
+  display:flex;align-items:stretch;flex-wrap:nowrap;
+  border:1px solid rgba(255,255,255,0.12);
   border-top:2px solid var(--hud-orange);
-  box-shadow:0 6px 24px rgba(0,0,0,0.55),inset 0 1px 0 rgba(255,255,255,0.05);
-  text-align:center}
+  border-radius:3px;overflow:hidden;
+  box-shadow:0 8px 28px rgba(0,0,0,0.58),inset 0 1px 0 rgba(255,255,255,0.06)}
+.pvp-hud-side{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-width:78px;padding:6px 16px 8px;box-sizing:border-box}
+.pvp-hud-ct{
+  background:linear-gradient(165deg,rgba(36,92,160,0.42) 0%,rgba(12,28,52,0.88) 100%)}
+.pvp-hud-t{
+  background:linear-gradient(165deg,rgba(160,64,36,0.42) 0%,rgba(48,18,12,0.88) 100%)}
+.pvp-hud-team{
+  font-family:'Rajdhani',sans-serif;font-size:9px;font-weight:600;letter-spacing:4px;
+  color:rgba(255,255,255,0.48);text-transform:uppercase;margin-bottom:2px}
+.pvp-hud-score-num{
+  font-family:'Orbitron',monospace;font-size:28px;font-weight:800;line-height:1;
+  font-variant-numeric:tabular-nums;letter-spacing:1px}
+.pvp-hud-ct .pvp-hud-score-num{color:#9fd4ff;text-shadow:0 0 20px rgba(120,190,255,0.4),0 1px 0 rgba(0,0,0,0.75)}
+.pvp-hud-t .pvp-hud-score-num{color:#ffb59a;text-shadow:0 0 20px rgba(255,140,100,0.38),0 1px 0 rgba(0,0,0,0.75)}
+.pvp-timer-bar{
+  min-width:132px;max-width:min(42vw,200px);padding:5px 14px 7px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:linear-gradient(180deg,rgba(18,18,24,0.98) 0%,rgba(6,6,10,0.96) 100%);
+  border-left:1px solid rgba(255,255,255,0.08);border-right:1px solid rgba(255,255,255,0.08);
+  text-align:center;flex-shrink:0}
 #pvp-match-timer-label{font-family:'Rajdhani',sans-serif;font-size:9px;letter-spacing:5px;color:rgba(255,255,255,0.42);
   text-transform:uppercase;margin-bottom:1px}
-#pvp-match-timer{font-family:'Orbitron',monospace;font-size:26px;font-weight:800;color:var(--text-bright);
-  letter-spacing:4px;line-height:1.15;
+#pvp-match-timer{font-family:'Orbitron',monospace;font-size:24px;font-weight:800;color:var(--text-bright);
+  letter-spacing:3px;line-height:1.15;
   text-shadow:0 0 16px rgba(255,106,0,0.22),0 1px 0 rgba(0,0,0,0.8)}
-#pvp-match-timer-wrap.pvp-timer-low .pvp-timer-bar{border-top-color:var(--hud-red);
-  box-shadow:0 6px 24px rgba(0,0,0,0.55),0 0 20px rgba(255,23,68,0.12),inset 0 1px 0 rgba(255,255,255,0.05)}
+#pvp-match-timer.pvp-timer-ot-text{font-family:system-ui,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  letter-spacing:0.18em;font-weight:800;font-size:20px}
+#pvp-match-timer-wrap.pvp-timer-low .pvp-top-hud{border-top-color:var(--hud-red);
+  box-shadow:0 8px 28px rgba(0,0,0,0.58),0 0 22px rgba(255,23,68,0.14),inset 0 1px 0 rgba(255,255,255,0.06)}
 #pvp-match-timer-wrap.pvp-timer-low #pvp-match-timer{color:#ff8a80;text-shadow:0 0 18px rgba(255,23,68,0.35)}
-body.pvp-match-active #score-container{top:58px}
+body.pvp-match-active #score-container{top:62px}
 body.pvp-match-active #kill-feed{top:118px}
 #pvp-match-end-overlay{position:fixed;inset:0;z-index:2000;display:none;flex-direction:column;align-items:center;
-  justify-content:center;background:rgba(0,0,0,0.82);backdrop-filter:blur(6px);pointer-events:auto}
-#pvp-match-end-overlay .pvp-end-title{font-family:'Orbitron',sans-serif;font-size:22px;color:var(--text-bright);letter-spacing:6px;margin-bottom:12px}
-#pvp-match-end-overlay .pvp-end-sub{font-family:'Rajdhani',sans-serif;font-size:14px;color:rgba(255,255,255,0.55);margin-bottom:28px}
+  justify-content:center;background:rgba(0,0,0,0.88);backdrop-filter:blur(8px);pointer-events:auto;
+  max-height:100vh;overflow-y:auto;padding:28px 16px 32px;box-sizing:border-box}
+#pvp-match-end-overlay .pvp-end-result{display:none;font-family:'Orbitron',sans-serif;font-size:clamp(36px,9vw,56px);font-weight:800;
+  letter-spacing:14px;margin-bottom:6px;line-height:1.1}
+#pvp-match-end-overlay .pvp-end-result.pvp-end-win{color:#7ef0b0;text-shadow:0 0 32px rgba(110,240,176,0.4)}
+#pvp-match-end-overlay .pvp-end-result.pvp-end-lose{color:#ff9a8b;text-shadow:0 0 32px rgba(255,100,90,0.35)}
+#pvp-match-end-overlay .pvp-end-result.pvp-end-draw{color:rgba(255,255,255,0.78)}
+#pvp-match-end-overlay .pvp-end-title{font-family:'Orbitron',sans-serif;font-size:17px;color:rgba(255,255,255,0.65);letter-spacing:5px;margin-bottom:14px}
+#pvp-match-end-overlay .pvp-end-sub{font-family:'Rajdhani',sans-serif;font-size:14px;color:rgba(255,255,255,0.52);margin-bottom:22px;max-width:min(440px,92vw);text-align:center;line-height:1.45}
 #pvp-match-end-overlay .menu-btn{margin-top:4px}
+#pvp-end-match-board{display:none;width:min(560px,96vw);margin-bottom:8px}
+.pvp-end-finals-wrap{display:flex;align-items:stretch;justify-content:center;gap:0;margin-bottom:20px;
+  background:linear-gradient(180deg,rgba(255,255,255,0.06) 0%,rgba(0,0,0,0.2) 100%);
+  border:1px solid rgba(255,255,255,0.1);border-radius:10px;overflow:hidden}
+.pvp-end-finals-side{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px 12px;min-width:0}
+.pvp-end-ct-block{background:linear-gradient(135deg,rgba(30,80,140,0.35) 0%,rgba(10,20,40,0.5) 100%)}
+.pvp-end-t-block{background:linear-gradient(135deg,rgba(140,50,30,0.35) 0%,rgba(40,15,10,0.5) 100%)}
+.pvp-end-side-label{font-family:'Rajdhani',sans-serif;font-size:10px;letter-spacing:3px;color:rgba(255,255,255,0.45);margin-bottom:6px;text-transform:uppercase}
+.pvp-end-side-score{font-family:'Orbitron',monospace;font-size:clamp(40px,11vw,56px);font-weight:800;line-height:1;letter-spacing:2px}
+.pvp-end-ct-block .pvp-end-side-score{color:#9fd4ff;text-shadow:0 0 28px rgba(120,190,255,0.45)}
+.pvp-end-t-block .pvp-end-side-score{color:#ffb59a;text-shadow:0 0 28px rgba(255,140,100,0.4)}
+.pvp-end-finals-colon{display:flex;align-items:center;font-family:'Orbitron',monospace;font-size:28px;font-weight:700;color:rgba(255,255,255,0.25);padding:0 4px}
+.pvp-end-stats-caption{font-family:'Rajdhani',sans-serif;font-size:10px;letter-spacing:5px;color:rgba(255,255,255,0.35);margin-bottom:10px;text-align:center}
+.pvp-end-table-scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:8px;
+  border:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.35)}
+.pvp-end-stats-table{width:100%;border-collapse:collapse;font-family:'Rajdhani',sans-serif;font-size:13px;min-width:420px}
+.pvp-end-stats-table th{text-align:left;padding:10px 8px;color:rgba(255,255,255,0.42);font-weight:600;font-size:11px;
+  letter-spacing:1px;border-bottom:1px solid rgba(255,255,255,0.12);white-space:nowrap}
+.pvp-end-stats-table th.col-num{text-align:right}
+.pvp-end-stats-table td{padding:11px 8px;border-bottom:1px solid rgba(255,255,255,0.05);color:rgba(255,255,255,0.9);vertical-align:middle}
+.pvp-end-stats-table td.col-num{text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+.pvp-end-stats-table tbody tr:last-child td{border-bottom:none}
+.pvp-end-stats-table tr.pvp-end-me{background:rgba(255,106,0,0.1)}
+.pvp-end-stats-table .pvp-end-nick{font-family:'Orbitron',monospace;font-size:11px;letter-spacing:0.5px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pvp-end-stats-table .pvp-end-team-ct{color:#9fd4ff}
+.pvp-end-stats-table .pvp-end-team-t{color:#ffb59a}
+/* === TAB 按住：房间战绩（联机） === */
+#tab-scoreboard-overlay{
+  position:fixed;inset:0;z-index:920;display:none;align-items:center;justify-content:center;
+  background:rgba(0,0,0,0.72);backdrop-filter:blur(6px);pointer-events:none}
+#tab-scoreboard-overlay.visible{display:flex}
+#tab-scoreboard-panel{
+  width:min(760px,96vw);max-height:min(82vh,680px);overflow:hidden;display:flex;flex-direction:column;
+  padding:20px 22px 16px;
+  background:linear-gradient(165deg,rgba(16,16,24,0.96) 0%,rgba(8,8,12,0.97) 100%);
+  border:1px solid rgba(255,106,0,0.38);border-radius:10px;
+  box-shadow:0 20px 50px rgba(0,0,0,0.65)}
+#tab-scoreboard-title{
+  font-family:'Orbitron',sans-serif;font-size:12px;letter-spacing:6px;color:rgba(255,255,255,0.55);
+  text-align:center;margin-bottom:4px}
+#tab-scoreboard-hint{
+  font-family:'Rajdhani',sans-serif;font-size:12px;color:rgba(255,255,255,0.38);text-align:center;margin-bottom:12px}
+#tab-scoreboard-scores{
+  display:none;justify-content:center;align-items:baseline;gap:12px;margin-bottom:12px;
+  font-family:'Orbitron',monospace;font-size:15px;font-weight:700;color:rgba(255,255,255,0.82)}
+#tab-scoreboard-scores.visible{display:flex}
+#tab-scoreboard-scores .tab-sb-sep{opacity:.35;font-weight:600}
+#tab-scoreboard-body-wrap{
+  overflow-y:auto;flex:1;min-height:0;-webkit-overflow-scrolling:touch;
+  border-radius:8px;border:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.35)}
 
 /* === MINIMAP === */
 #minimap-container{position:fixed;top:15px;left:15px;z-index:100}
@@ -213,6 +327,14 @@ body.pvp-match-active #kill-feed{top:118px}
 </style>
 </head>
 <body>
+<div id="map-loading-overlay" aria-hidden="true" role="status">
+  <div class="map-loading-panel">
+    <div class="map-loading-title">加载场景</div>
+    <div id="map-loading-label">准备中…</div>
+    <div id="map-loading-bar-wrap"><div id="map-loading-bar-fill"></div></div>
+    <div class="map-loading-meta"><span>地图资源</span><span id="map-loading-pct">0%</span></div>
+  </div>
+</div>
 
 <!-- MAIN MENU -->
 <div id="main-menu">
@@ -413,6 +535,7 @@ body.pvp-match-active #kill-feed{top:118px}
     <p><span>1/2/3</span> 切换武器</p>
     <p><span>Shift</span> 静步</p>
     <p><span>Ctrl</span> 下蹲</p>
+    <p><span>Tab（按住）</span> 房间全员战绩表</p>
   </div>
   <button class="menu-btn" onclick="quitToMenu()">退出对局</button>
 </div>
@@ -457,17 +580,88 @@ body.pvp-match-active #kill-feed{top:118px}
 <div id="hitmarker"></div>
 <div id="kill-feed"></div>
 
-<!-- PVP 对局时间（仅联机 PVP 显示） -->
+<!-- 联机：按住 Tab 显示房间战绩，松开关闭 -->
+<div id="tab-scoreboard-overlay" aria-hidden="true">
+  <div id="tab-scoreboard-panel">
+    <div id="tab-scoreboard-title">房间战绩</div>
+    <div id="tab-scoreboard-hint">按住 Tab 查看 · 松开关闭</div>
+    <div id="tab-scoreboard-scores">
+      <span id="tab-sb-ct">CT 0</span><span class="tab-sb-sep">:</span><span id="tab-sb-t">T 0</span>
+    </div>
+    <div id="tab-scoreboard-body-wrap">
+      <table class="pvp-end-stats-table" aria-label="房间战绩">
+        <thead>
+          <tr>
+            <th>玩家</th>
+            <th>队伍</th>
+            <th class="col-num">K</th>
+            <th class="col-num">D</th>
+            <th class="col-num">K/D</th>
+            <th class="col-num">伤害</th>
+            <th class="col-num">得分</th>
+            <th class="col-num">MVP</th>
+            <th class="col-num">爆头</th>
+          </tr>
+        </thead>
+        <tbody id="tab-scoreboard-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- PVP 顶栏：CT 分 | 时间 | T 分（仅联机 PVP） -->
 <div id="pvp-match-timer-wrap" aria-hidden="true">
-  <div class="pvp-timer-bar">
-    <div id="pvp-match-timer-label">对局时间</div>
-    <div id="pvp-match-timer">5:00</div>
+  <div class="pvp-top-hud" role="group" aria-label="比分与对局时间">
+    <div class="pvp-hud-side pvp-hud-ct">
+      <span class="pvp-hud-team">CT</span>
+      <span id="pvp-hud-ct-num" class="pvp-hud-score-num">0</span>
+    </div>
+    <div class="pvp-timer-bar">
+      <div id="pvp-match-timer-label">对局时间</div>
+      <div id="pvp-match-timer">5:00</div>
+    </div>
+    <div class="pvp-hud-side pvp-hud-t">
+      <span class="pvp-hud-team">T</span>
+      <span id="pvp-hud-t-num" class="pvp-hud-score-num">0</span>
+    </div>
   </div>
 </div>
 
 <div id="pvp-match-end-overlay">
-  <div class="pvp-end-title">对局结束</div>
-  <div class="pvp-end-sub">时间已到 · 将返回房间，可再次开始游戏</div>
+  <div id="pvp-end-result" class="pvp-end-result" style="display:none" aria-live="polite"></div>
+  <div class="pvp-end-title" id="pvp-end-title">对局结束</div>
+  <div id="pvp-end-match-board" class="pvp-end-match-board" style="display:none">
+    <div class="pvp-end-finals-wrap">
+      <div class="pvp-end-finals-side pvp-end-ct-block">
+        <span class="pvp-end-side-label">反恐精英 · 回合分</span>
+        <span id="pvp-end-ct-num" class="pvp-end-side-score">0</span>
+      </div>
+      <div class="pvp-end-finals-colon">:</div>
+      <div class="pvp-end-finals-side pvp-end-t-block">
+        <span class="pvp-end-side-label">恐怖分子 · 回合分</span>
+        <span id="pvp-end-t-num" class="pvp-end-side-score">0</span>
+      </div>
+    </div>
+    <div class="pvp-end-stats-caption">个人战绩</div>
+    <div class="pvp-end-table-scroll">
+      <table class="pvp-end-stats-table" aria-label="个人战绩">
+        <thead>
+          <tr>
+            <th>玩家</th>
+            <th>阵营</th>
+            <th class="col-num">击杀</th>
+            <th class="col-num">死亡</th>
+            <th class="col-num">K/D</th>
+            <th class="col-num">伤害</th>
+            <th class="col-num">得分</th>
+            <th class="col-num">爆头</th>
+          </tr>
+        </thead>
+        <tbody id="pvp-end-stats-body"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="pvp-end-sub" id="pvp-end-sub">时间已到 · 将返回房间，可再次开始游戏</div>
   <button type="button" class="menu-btn primary" onclick="returnToRoomAfterMatchEnd()">立即返回房间</button>
 </div>
 
@@ -542,7 +736,7 @@ body.pvp-match-active #kill-feed{top:118px}
   <div id="minimap-label">沙漠2</div>
 </div>
 
-<div id="dev-spawn-hud" style="display:none;position:fixed;top:10px;left:10px;z-index:101;pointer-events:none;font-family:'Orbitron','Rajdhani',sans-serif;font-size:11px;color:rgba(220,235,255,0.95);text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(8,10,18,0.72);padding:10px 12px;border-radius:6px;border:1px solid rgba(0,176,255,0.28);line-height:1.5;max-width:min(96vw,400px)">
+<div id="dev-spawn-hud">
   <div style="font-size:9px;letter-spacing:2px;color:rgba(0,200,255,0.85);margin-bottom:6px">世界坐标（记录出生点）</div>
   <div id="dev-coords-line1">相机 —</div>
   <div id="dev-coords-line2">脚底 —</div>

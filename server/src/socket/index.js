@@ -20,6 +20,8 @@ const playerSocketMap = new Map();
 
 /** PVP 复活后短时无敌：socketId → { until, ox, oy, oz }（与复活包相机位一致） */
 const spawnProtectBySocket = new Map();
+/** 1v1：常规时间结束且双方同血时进入加时，直至产生击杀；用 Set 防重复 roundTimeUp、并在回合真正结算时清除 */
+const oneV1OvertimeRoomIds = new Set();
 const SPAWN_PROTECT_MS = 5000;
 const SPAWN_PROTECT_MOVE_EPS_XZ = 0.14;
 const SPAWN_PROTECT_MOVE_EPS_Y = 0.11;
@@ -39,6 +41,95 @@ function isSpawnProtectedNow(socketId) {
     return false;
   }
   return true;
+}
+
+/** 结算界面：真人战绩列表（不含机器人） */
+function serializeHumanPlayersForMatchEnd(room) {
+  return room.players
+    .filter((p) => !isBot(p))
+    .map((p) => ({
+      odId: String(p.odId || ''),
+      playerId: p.playerId != null ? String(p.playerId) : '',
+      nickname: String(p.nickname || '玩家').replace(/^_bot_/, ''),
+      team: p.team === 'T' ? 'T' : 'CT',
+      kills: Number(p.stats?.kills) || 0,
+      deaths: Number(p.stats?.deaths) || 0,
+      score: Number(p.stats?.score) || 0,
+      damage: Math.round(Number(p.stats?.damage) || 0),
+      mvps: Number(p.stats?.mvps) || 0,
+      headshots: Number(p.stats?.headshots) || 0,
+    }));
+}
+
+/** game:playerHit 下发用纯对象，避免 Mongoose 子文档序列化异常；并与击杀增量顺序一致 */
+function snapPlayerRoomStats(stats) {
+  return {
+    kills: Number(stats?.kills) || 0,
+    deaths: Number(stats?.deaths) || 0,
+    score: Number(stats?.score) || 0,
+    mvps: Number(stats?.mvps) || 0,
+    damage: Math.round(Number(stats?.damage) || 0),
+    headshots: Number(stats?.headshots) || 0,
+  };
+}
+
+/**
+ * 1v1 回合结算（服务端权威）。winnerTeam: CT | T | draw（平局双方不加分）
+ */
+async function apply1v1RoundOutcome(io, room, roomId, winnerTeam) {
+  if (room.settings.mode !== '1v1') return;
+  if (room.gameState.status !== 'playing') return;
+  oneV1OvertimeRoomIds.delete(normalizeRoomId(roomId));
+
+  if (winnerTeam === 'CT') {
+    room.gameState.ctScore += 1;
+  } else if (winnerTeam === 'T') {
+    room.gameState.tScore += 1;
+  }
+
+  const winScore = Number(room.settings.winScore);
+  const ws = Number.isFinite(winScore) && winScore > 0 ? Math.floor(winScore) : 8;
+  const ctWon = room.gameState.ctScore >= ws;
+  const tWon = room.gameState.tScore >= ws;
+
+  if (ctWon || tWon) {
+    room.gameState.status = 'ended';
+    room.gameState.endTime = new Date();
+    const matchWinner = ctWon ? 'CT' : 'T';
+    await recordMatchResult(room);
+    room.markModified('players');
+    await room.save();
+    io.to(roomId).emit('game:ended', {
+      winner: matchWinner,
+      ctScore: room.gameState.ctScore,
+      tScore: room.gameState.tScore,
+      reason: 'score',
+      players: serializeHumanPlayersForMatchEnd(room),
+    });
+    return;
+  }
+
+  room.gameState.round += 1;
+  room.gameState.roundStartTime = new Date();
+  for (const p of room.players) {
+    if (!isBot(p)) {
+      p.health = 100;
+      const oid = p.odId != null ? String(p.odId) : '';
+      if (oid && spawnProtectBySocket.has(oid)) {
+        spawnProtectBySocket.delete(oid);
+        io.to(roomId).emit('game:spawnProtectEnd', { socketId: oid });
+      }
+    }
+  }
+  room.markModified('players');
+  await room.save();
+  io.to(roomId).emit('game:roundEnded', {
+    winner: winnerTeam,
+    round: room.gameState.round,
+    ctScore: room.gameState.ctScore,
+    tScore: room.gameState.tScore,
+    roundStartTime: room.gameState.roundStartTime,
+  });
 }
 
 function setupSocket(io) {
@@ -107,6 +198,47 @@ function setupSocket(io) {
       } catch (error) {
         console.error('加入房间错误:', error);
         socket.emit('room:error', { message: '加入房间失败' });
+      }
+    });
+
+    const ROOM_CHAT_MAX_LEN = 200;
+    socket.on('room:chat', async (data) => {
+      try {
+        const roomId = normalizeRoomId(data?.roomId);
+        const playerId = socket.playerId;
+        const raw = data?.text;
+        const text = typeof raw === 'string' ? raw.trim() : '';
+
+        if (!playerId) {
+          socket.emit('room:error', { message: '请先登录' });
+          return;
+        }
+        if (!roomId) return;
+        if (!text) return;
+        if (text.length > ROOM_CHAT_MAX_LEN) {
+          socket.emit('room:error', { message: '消息过长' });
+          return;
+        }
+
+        const room = await Room.findOne({ roomId });
+        if (!room) return;
+
+        const player = room.players.find((p) => p.playerId?.toString() === playerId);
+        if (!player) {
+          socket.emit('room:error', { message: '您不在该房间' });
+          return;
+        }
+
+        const sender = player.nickname || '玩家';
+        io.to(roomId).emit('room:chatMessage', {
+          roomId,
+          sender,
+          text,
+          playerId,
+          ts: Date.now(),
+        });
+      } catch (error) {
+        console.error('房间聊天错误:', error);
       }
     });
 
@@ -218,6 +350,36 @@ function setupSocket(io) {
         );
         if (!player || (team !== 'CT' && team !== 'T')) return;
 
+        if (room.settings?.mode === 'pve') {
+          if (team !== 'CT') {
+            socket.emit('room:error', { message: 'PVE 仅可处于反恐小队' });
+            return;
+          }
+          const maxSquad = Math.max(1, Number(room.settings?.maxPlayers) || 10);
+          let hCT = room.players.filter(p => !isBot(p) && p.team === 'CT').length;
+          if (player.team === 'CT') hCT -= 1;
+          if (hCT + 1 > maxSquad) {
+            socket.emit('room:error', { message: '小队已满' });
+            return;
+          }
+          player.team = 'CT';
+          rebalanceRoomBots(room);
+          await room.save();
+          io.to(roomId).emit('room:teamChanged', {
+            socketId: socket.id,
+            team: 'CT',
+            players: room.players.map(p => ({
+              odId: p.odId,
+              playerId: p.playerId?.toString(),
+              nickname: p.nickname,
+              team: p.team,
+              isReady: p.isReady,
+              isHost: p.isHost
+            }))
+          });
+          return;
+        }
+
         const maxPerTeam = maxHumansPerTeam(room);
         let hCT = room.players.filter(p => !isBot(p) && p.team === 'CT').length;
         let hT = room.players.filter(p => !isBot(p) && p.team === 'T').length;
@@ -289,33 +451,50 @@ function setupSocket(io) {
         }
 
         const humans = room.players.filter(p => !isBot(p));
-        if (room.settings.mode === '1v1' && humans.length < 2) {
-          socket.emit('game:error', { message: '1v1 模式需要双方玩家到齐后才能开始' });
+        const mode = room.settings.mode;
+
+        if (mode === '1v1' && humans.length < 2) {
+          socket.emit('game:error', { message: '1v1 模式需要双方到齐后才能开始' });
+          return;
+        }
+        if ((mode === 'pvp' || mode === 'pve') && humans.length < 1) {
+          socket.emit('game:error', { message: '房间内至少需一名玩家' });
           return;
         }
 
-        // 房主可以直接开始 (跳过准备检查)
+        const allHumansReady = humans.length > 0 && humans.every((p) => p.isReady === true);
+        if (!allHumansReady) {
+          socket.emit('game:error', { message: '请等待全部玩家准备后再开始（含房主）' });
+          return;
+        }
+
         console.log('所有玩家:', room.players.map(p => ({ nickname: p.nickname, isReady: p.isReady, isHost: p.isHost })));
 
         // 开始游戏
         room.gameState.status = 'playing';
         room.gameState.round = 1;
-        room.gameState.startTime = new Date();
+        const startedAt = new Date();
+        room.gameState.startTime = startedAt;
+        room.gameState.roundStartTime = startedAt;
         room.players.forEach((p) => {
           p.health = 100;
         });
         room.markModified('players');
         await room.save();
 
+        oneV1OvertimeRoomIds.delete(roomId);
+
         io.to(roomId).emit('game:started', {
           round: room.gameState.round,
           settings: room.settings,
+          serverNow: Date.now(),
           gameState: {
             status: room.gameState.status,
             round: room.gameState.round,
             ctScore: room.gameState.ctScore,
             tScore: room.gameState.tScore,
-            startTime: room.gameState.startTime
+            startTime: room.gameState.startTime,
+            roundStartTime: room.gameState.roundStartTime,
           }
         });
 
@@ -354,7 +533,8 @@ function setupSocket(io) {
               round: room.gameState.round,
               ctScore: room.gameState.ctScore,
               tScore: room.gameState.tScore,
-              startTime: room.gameState.startTime
+              startTime: room.gameState.startTime,
+              roundStartTime: room.gameState.roundStartTime,
             }
           });
           return reply({ ok: true });
@@ -364,7 +544,9 @@ function setupSocket(io) {
         room.gameState.ctScore = 0;
         room.gameState.tScore = 0;
         room.gameState.startTime = undefined;
+        room.gameState.roundStartTime = undefined;
         room.gameState.endTime = undefined;
+        oneV1OvertimeRoomIds.delete(roomId);
         await room.save();
         io.to(roomId).emit('room:gameStateUpdated', {
           gameState: {
@@ -372,7 +554,8 @@ function setupSocket(io) {
             round: room.gameState.round,
             ctScore: room.gameState.ctScore,
             tScore: room.gameState.tScore,
-            startTime: room.gameState.startTime
+            startTime: room.gameState.startTime,
+            roundStartTime: room.gameState.roundStartTime,
           }
         });
         return reply({ ok: true });
@@ -459,6 +642,7 @@ function setupSocket(io) {
 
         const room = await Room.findOne({ roomId });
         if (!room) return;
+        if (room.gameState.status !== 'playing') return;
 
         const sid = String(socket.id || '');
         const tid = String(targetId || '');
@@ -510,28 +694,38 @@ function setupSocket(io) {
         hp = Math.max(0, Math.floor(hp - dmg));
         target.health = hp;
 
+        if (hp <= 0) {
+          target.stats.deaths += 1;
+          attacker.stats.kills += 1;
+          attacker.stats.score += (resolvedHitType === 'headshot' ? 300 : 100);
+          if (resolvedHitType === 'headshot') {
+            attacker.stats.headshots = (Number(attacker.stats.headshots) || 0) + 1;
+          }
+        }
+
         const payload = {
           attackerId: socket.id,
           targetId: tid,
+          attackerPlayerId: attacker.playerId != null ? String(attacker.playerId) : '',
+          targetPlayerId: target.playerId != null ? String(target.playerId) : '',
           damage: dmg,
           weapon: weaponName,
           hitType: resolvedHitType,
           remainingHealth: hp,
           killed: hp <= 0,
-          attackerStats: attacker.stats,
-          targetStats: target.stats
+          attackerStats: snapPlayerRoomStats(attacker.stats),
+          targetStats: snapPlayerRoomStats(target.stats),
         };
-
-        if (hp <= 0) {
-          target.stats.deaths += 1;
-          attacker.stats.kills += 1;
-          attacker.stats.score += (resolvedHitType === 'headshot' ? 300 : 100);
-        }
 
         /** 嵌套 players[].health 变更必须标记，否则 save 不写库，每枪都像从满血起算 → 永远打不死 */
         room.markModified('players');
         await room.save();
         io.to(roomId).emit('game:playerHit', payload);
+
+        if (hp <= 0 && room.settings.mode === '1v1' && room.gameState.status === 'playing') {
+          const w = attacker.team === 'CT' || attacker.team === 'T' ? attacker.team : 'CT';
+          await apply1v1RoundOutcome(io, room, roomId, w);
+        }
       } catch (error) {
         console.error('命中事件错误:', error);
       }
@@ -547,7 +741,11 @@ function setupSocket(io) {
         if (!room) return;
         const p = room.players.find((x) => String(x.odId || '') === String(socket.id || ''));
         if (p) {
-          p.health = 100;
+          /** 1v1 回合进行中禁止用复活同步把血量拉回满（防作弊回血）；新回合血量由 apply1v1RoundOutcome / game:start 写入 */
+          const oneV1Playing = room.settings?.mode === '1v1' && room.gameState?.status === 'playing';
+          if (!oneV1Playing) {
+            p.health = 100;
+          }
           room.markModified('players');
           await room.save();
           const posOk =
@@ -599,7 +797,59 @@ function setupSocket(io) {
       }
     });
 
-    // 回合结束
+    /** 1v1 回合时间到：仅房主上报，服务端按血量判胜或平局 */
+    socket.on('game:roundTimeUp', async (data) => {
+      try {
+        const roomId = normalizeRoomId(data?.roomId);
+        if (!roomId) return;
+        const room = await Room.findOne({ roomId });
+        if (!room) return;
+        if (room.settings.mode !== '1v1' || room.gameState.status !== 'playing') return;
+
+        const host = room.players.find((p) => p.isHost);
+        if (!host || String(host.odId || '') !== String(socket.id || '')) return;
+
+        const ridNorm = normalizeRoomId(roomId);
+        if (oneV1OvertimeRoomIds.has(ridNorm)) {
+          return;
+        }
+
+        const humans = room.players.filter((p) => !isBot(p));
+        if (humans.length !== 2) return;
+
+        const [a, b] = humans;
+        const ha = Number(a.health);
+        const hb = Number(b.health);
+        const haa = Number.isFinite(ha) ? Math.max(0, Math.round(ha)) : 0;
+        const hbb = Number.isFinite(hb) ? Math.max(0, Math.round(hb)) : 0;
+        const aAlive = haa > 0;
+        const bAlive = hbb > 0;
+
+        /** 时间到：双方仍存活则比血量，高者胜；同血则进入加时（不产生回合分，不重置），直至一方被击杀 */
+        let winnerTeam = 'draw';
+        if (aAlive && bAlive) {
+          if (haa > hbb) {
+            winnerTeam = a.team === 'T' ? 'T' : 'CT';
+          } else if (hbb > haa) {
+            winnerTeam = b.team === 'T' ? 'T' : 'CT';
+          } else {
+            oneV1OvertimeRoomIds.add(ridNorm);
+            io.to(roomId).emit('game:1v1Overtime', { roomId: ridNorm });
+            return;
+          }
+        } else if (aAlive && !bAlive) {
+          winnerTeam = a.team === 'T' ? 'T' : 'CT';
+        } else if (!aAlive && bAlive) {
+          winnerTeam = b.team === 'T' ? 'T' : 'CT';
+        }
+
+        await apply1v1RoundOutcome(io, room, roomId, winnerTeam);
+      } catch (error) {
+        console.error('game:roundTimeUp 错误:', error);
+      }
+    });
+
+    // 回合结束（非 1v1；1v1 仅服务端 game:hit / game:roundTimeUp 结算）
     socket.on('game:roundEnd', async (data) => {
       try {
         const roomId = normalizeRoomId(data?.roomId);
@@ -608,6 +858,7 @@ function setupSocket(io) {
 
         const room = await Room.findOne({ roomId });
         if (!room) return;
+        if (room.settings.mode === '1v1') return;
 
         if (winner === 'CT') {
           room.gameState.ctScore += 1;
@@ -623,11 +874,13 @@ function setupSocket(io) {
           
           // 记录战绩
           await recordMatchResult(room);
-          
+
           io.to(roomId).emit('game:ended', {
             winner: winner,
             ctScore: room.gameState.ctScore,
-            tScore: room.gameState.tScore
+            tScore: room.gameState.tScore,
+            reason: 'score',
+            players: serializeHumanPlayersForMatchEnd(room),
           });
         } else {
           room.gameState.round += 1;
@@ -663,6 +916,40 @@ function setupSocket(io) {
           if (playerIndex === -1) continue;
 
           const isHost = room.players[playerIndex].isHost;
+
+          /** 1v1 对局中一方断线/离开：另一方直接获胜（先结算并广播，再移出断线玩家） */
+          if (room.settings?.mode === '1v1' && room.gameState?.status === 'playing') {
+            const humans = room.players.filter((p) => !isBot(p));
+            const leaver = room.players[playerIndex];
+            const opponent = humans.find((h) => String(h.odId || '') !== String(socket.id || ''));
+            if (humans.length === 2 && opponent && leaver && !isBot(leaver)) {
+              const ws = Number(room.settings.winScore);
+              const winNeed = Number.isFinite(ws) && ws > 0 ? Math.floor(ws) : 8;
+              const winTeam = opponent.team === 'T' ? 'T' : 'CT';
+              if (winTeam === 'CT') {
+                room.gameState.ctScore = Math.max(Number(room.gameState.ctScore) || 0, winNeed);
+              } else {
+                room.gameState.tScore = Math.max(Number(room.gameState.tScore) || 0, winNeed);
+              }
+              room.gameState.status = 'ended';
+              room.gameState.endTime = new Date();
+              room.markModified('players');
+              try {
+                await room.save();
+                await recordMatchResult(room);
+                io.to(room.roomId).emit('game:ended', {
+                  winner: winTeam,
+                  ctScore: room.gameState.ctScore,
+                  tScore: room.gameState.tScore,
+                  reason: 'opponent_left',
+                  players: serializeHumanPlayersForMatchEnd(room),
+                });
+              } catch (e) {
+                console.error('1v1 对手离开结算错误:', e);
+              }
+            }
+          }
+
           room.players.splice(playerIndex, 1);
 
           const realPlayers = room.players.filter(p => !isBot(p));
@@ -714,7 +1001,7 @@ async function recordMatchResult(room) {
         deaths: p.stats.deaths,
         score: p.stats.score,
         mvps: p.stats.mvps,
-        headshots: 0,
+        headshots: Number(p.stats.headshots) || 0,
         damage: p.stats.damage
       })),
       result: {
@@ -738,7 +1025,9 @@ async function recordMatchResult(room) {
         if (playerDoc) {
           playerDoc.stats.totalKills += player.stats.kills;
           playerDoc.stats.totalDeaths += player.stats.deaths;
-          
+          playerDoc.stats.headshots =
+            (Number(playerDoc.stats.headshots) || 0) + (Number(player.stats.headshots) || 0);
+
           const isWinner = (player.team === 'CT' && room.gameState.ctScore > room.gameState.tScore) ||
                           (player.team === 'T' && room.gameState.tScore > room.gameState.ctScore);
           

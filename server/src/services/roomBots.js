@@ -49,6 +49,31 @@ function rebalanceRoomBots(room) {
     return;
   }
 
+  /** PVE：真人仅 CT 小队；T 侧仅机器人占位（后续可替换为怪物） */
+  if (room.settings?.mode === 'pve') {
+    const maxPlayers = Math.max(2, Number(room.settings?.maxPlayers) || 10);
+    const maxPerTeam = Math.min(5, Math.floor(maxPlayers / 2));
+    const humans = room.players.filter(p => !isBot(p));
+    humans.forEach((h) => { h.team = 'CT'; });
+    let botsT = Math.max(0, maxPerTeam);
+    while (humans.length + botsT > maxPlayers && botsT > 0) botsT -= 1;
+    const ts = Date.now();
+    const bots = [];
+    for (let i = 0; i < botsT; i++) {
+      bots.push({
+        odId: `bot_${ts}_T_${i}_${Math.random().toString(36).slice(2, 10)}`,
+        playerId: null,
+        nickname: BOT_NAMES[i % BOT_NAMES.length],
+        team: 'T',
+        isReady: true,
+        isHost: false,
+        stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0, headshots: 0 }
+      });
+    }
+    room.players = [...humans, ...bots];
+    return;
+  }
+
   const maxPlayers = Math.max(2, Number(room.settings?.maxPlayers) || 10);
   const maxPerTeam = maxHumansPerTeam(room);
 
@@ -77,7 +102,7 @@ function rebalanceRoomBots(room) {
       team,
       isReady: true,
       isHost: false,
-      stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0 }
+      stats: { kills: 0, deaths: 0, score: 0, mvps: 0, damage: 0, headshots: 0 }
     });
     nameIdx += 1;
   }

@@ -60,6 +60,7 @@ export interface PlayerRoomStats {
   score: number;
   mvps: number;
   damage: number;
+  headshots: number;
 }
 
 export interface GameState {
@@ -67,6 +68,11 @@ export interface GameState {
   round: number;
   ctScore: number;
   tScore: number;
+  /** 服务端 game:start 写入，对局 HUD 倒计时锚点 */
+  startTime?: string | Date;
+  /** 1v1 当前回合开始（REST/广播同步，中途加入与回合倒计时对齐） */
+  roundStartTime?: string | Date;
+  endTime?: string | Date;
 }
 
 export interface Weapon {

@@ -471,6 +471,18 @@ window.addEventListener('message', (event) => {
     handleSpawnProtectEndMessage(event.data);
     return;
   }
+  if(event.data && event.data.type === 'mp-1v1-overtime') {
+    handle1v1OvertimeMessage();
+    return;
+  }
+  if(event.data && event.data.type === 'mp-1v1-round-ended') {
+    handle1v1RoundEndedMessage(event.data);
+    return;
+  }
+  if(event.data && event.data.type === 'mp-1v1-match-ended') {
+    handle1v1MatchEndedMessage(event.data);
+    return;
+  }
   if (event.data && event.data.type === 'init') {
     multiplayerData = event.data;
 
@@ -494,13 +506,22 @@ window.addEventListener('message', (event) => {
         GAME.playerTeam = myPlayer.team || 'CT';
         GAME.playerIsHost = !!myPlayer.isHost;
       }
+      normalizeMultiplayerRoomPlayersStats();
+      if(isPvpMultiplayerRoom()) {
+        syncLocalHudStatsFromMultiplayerData(false);
+      }
     }
+
+    updateMinimapLabelForMap();
+    ensureMinimapThumbLoaded();
 
     if (roomId && !gameStarted) {
       gameStarted = true;
       mapReadyPromise.then(() => {
         startGame();
       });
+    } else if(gameStarted && GAME.running && isPvpMultiplayerRoom() && gs?.status === 'playing' && !pvpMatchEnded) {
+      applyPvpTimerAnchorsFromMultiplayerData();
     }
   }
 });
@@ -982,6 +1003,9 @@ async function init() {
 
   // Improve ground with grid pattern
   addGroundDetails();
+
+  /** 地图与 debris 就绪后再拍俯视快照，供小地图底图使用 */
+  scheduleMinimapWorldCapture();
 
   // Start loop
   animate();
@@ -2366,8 +2390,27 @@ function buildProceduralMap() {
   addBox(3, 1.4, T, -22, 0.7, 5, sandWall);
 }
 
+function setMapLoadingVisible(visible) {
+  const el = document.getElementById('map-loading-overlay');
+  if(!el) return;
+  el.style.display = visible ? 'flex' : 'none';
+  el.setAttribute('aria-hidden', visible ? 'false' : 'true');
+}
+
+function setMapLoadingProgress(ratio01, label) {
+  const fill = document.getElementById('map-loading-bar-fill');
+  const pct = document.getElementById('map-loading-pct');
+  const text = document.getElementById('map-loading-label');
+  const r = Math.round(Math.min(100, Math.max(0, ratio01 * 100)));
+  if(fill) fill.style.width = r + '%';
+  if(pct) pct.textContent = r + '%';
+  if(text && label) text.textContent = label;
+}
+
 async function buildMap() {
   mapHalfBound = GAME.mapSize / 2;
+  setMapLoadingVisible(true);
+  setMapLoadingProgress(0, GAME.useDust2GlbMap ? '准备加载地图…' : '生成场景…');
   try {
     if(GAME.useDust2GlbMap) {
       try {
@@ -2378,6 +2421,7 @@ async function buildMap() {
           position: GAME.dust2MapPosition,
           rotationY: GAME.dust2MapRotationY,
           alignMinYToZero: GAME.dust2AlignMinYToZero,
+          onProgress: (ratio, phase) => setMapLoadingProgress(ratio, phase),
         });
         visualRoot.name = 'dust2_visual';
         scene.add(visualRoot);
@@ -2416,13 +2460,18 @@ async function buildMap() {
         mapUseBVHCollision = false;
         mapWorldBounds = null;
         lastValidGroundFeetY = null;
+        setMapLoadingProgress(0.2, '加载失败，使用备用场景…');
         buildProceduralMap();
+        setMapLoadingProgress(1, '就绪');
       }
     } else {
+      setMapLoadingProgress(0.4, '生成程序场景…');
       buildProceduralMap();
+      setMapLoadingProgress(1, '就绪');
     }
   } finally {
     notifyMapReady();
+    setMapLoadingVisible(false);
   }
 }
 
@@ -3174,7 +3223,17 @@ function getRemotePlayerTeam(socketId) {
   if(!multiplayerData || !multiplayerData.players || socketId == null) return null;
   const sid = String(socketId);
   const p = multiplayerData.players.find(x => String(x.odId || '') === sid);
-  return p && p.team ? p.team : null;
+  if(p && p.team) return p.team;
+  /** 1v1：唯一真人对手的 odId 可能与位移包 socketId 短暂不一致时，仍按对手阵营解析 */
+  if(isMultiplayer1v1RoomMode()) {
+    const pid = String(multiplayerData.playerId || '');
+    const humans = (multiplayerData.players || []).filter(x => !x.isBot);
+    if(humans.length === 2) {
+      const other = humans.find(h => String(h.playerId || '') !== pid);
+      if(other && other.team) return other.team;
+    }
+  }
+  return null;
 }
 
 /** 联机远端玩家是否可作为射击/近战目标（阵营 + 友伤） */
@@ -3237,11 +3296,8 @@ function markRemotePlayerAlive(socketId) {
   entry.corpseYaw = undefined;
   entry.mpMarkedDeadAt = undefined;
   entry.deathFeetPos = undefined;
-  if(entry.dropWeaponGroup && scene) {
-    scene.remove(entry.dropWeaponGroup);
-    removeWorldWeaponDropFromList(entry.dropWeaponGroup);
-    entry.dropWeaponGroup = null;
-  }
+  /** 世界掉落物留在场景与 worldWeaponDrops 中，勿随复活从场景移除 */
+  entry.dropWeaponGroup = null;
   clearRemotePlayerCorpsePose(entry.group);
   entry.curPos.copy(entry.targetPos);
   entry.curYaw = entry.targetYaw;
@@ -3353,11 +3409,76 @@ function getLocalMultiplayerSocketId() {
   return '';
 }
 
+function normalizeMultiplayerRoomPlayersStats() {
+  if(!multiplayerData || !multiplayerData.players) return;
+  for(let i = 0; i < multiplayerData.players.length; i++) {
+    const p = multiplayerData.players[i];
+    if(!p.stats) p.stats = {};
+    p.stats.kills = Number(p.stats.kills) || 0;
+    p.stats.deaths = Number(p.stats.deaths) || 0;
+    p.stats.score = Number(p.stats.score) || 0;
+    p.stats.mvps = Number(p.stats.mvps) || 0;
+    p.stats.damage = Math.round(Number(p.stats.damage) || 0);
+    p.stats.headshots = Number(p.stats.headshots) || 0;
+  }
+}
+
+/** 联机 PVP：击杀/爆头 HUD 与本地缓存均以服务端 stats 为准 */
+function syncLocalHudStatsFromMultiplayerData(lastKillWasHeadshot) {
+  if(!isPvpMultiplayerRoom() || !multiplayerData || !multiplayerData.players) return;
+  const pid = String(multiplayerData.playerId || '');
+  const sock = getLocalMultiplayerSocketId();
+  const me = multiplayerData.players.find(p => {
+    const matchPid = p.playerId != null && String(p.playerId) === pid;
+    const matchSock = !!sock && String(p.odId || '') === sock;
+    return matchPid || matchSock;
+  });
+  if(!me || !me.stats) return;
+  GAME.kills = Number(me.stats.kills) || 0;
+  GAME.headshots = Number(me.stats.headshots) || 0;
+  updateScoreUI();
+  updateKillCounter(!!lastKillWasHeadshot);
+}
+
+/** 用服务端 game:playerHit 中的 stats 更新本地房间战绩缓存（供 Tab 战绩板） */
+function mergeRoomStatsFromPlayerHitPayload(payload) {
+  if(!payload || !multiplayerData || !multiplayerData.players) return;
+  const applyStats = (socketId, playerIdStr, statsObj) => {
+    if(!statsObj) return;
+    const sid = String(socketId || '');
+    const pid = String(playerIdStr || '');
+    let p = multiplayerData.players.find(x => String(x.odId || '') === sid);
+    if(!p && pid) {
+      p = multiplayerData.players.find(x => {
+        const xid = x.playerId;
+        const xs = xid != null && xid !== '' ? String(xid) : '';
+        return xs === pid;
+      });
+    }
+    if(!p) return;
+    if(!p.stats) p.stats = {};
+    p.stats.kills = Number(statsObj.kills) || 0;
+    p.stats.deaths = Number(statsObj.deaths) || 0;
+    p.stats.score = Number(statsObj.score) || 0;
+    p.stats.mvps = Number(statsObj.mvps) || 0;
+    p.stats.damage = Math.round(Number(statsObj.damage) || 0);
+    p.stats.headshots = Number(statsObj.headshots) || 0;
+    /** init 时 odId 可能滞后于当前 socket，命中包更准，便于后续事件继续匹配 */
+    if(sid && String(p.odId || '') !== sid) {
+      p.odId = sid;
+    }
+  };
+  /** 服务端已在广播前写入击杀/死亡/得分，此处只同步快照，不可再 +1（否则会重复计数） */
+  applyStats(payload.attackerId, payload.attackerPlayerId, payload.attackerStats);
+  applyStats(payload.targetId, payload.targetPlayerId, payload.targetStats);
+}
+
 /**
  * game:playerHit 广播：本地受害者扣血；全员同步远端尸体与击杀播报。
  */
 function handleMultiplayerPlayerHit(payload) {
   if(!payload || !multiplayerData) return;
+  mergeRoomStatsFromPlayerHitPayload(payload);
   const myId = getLocalMultiplayerSocketId();
   const tid = String(payload.targetId || '');
   const aid = String(payload.attackerId || '');
@@ -3375,8 +3496,10 @@ function handleMultiplayerPlayerHit(payload) {
       updateHealthUI();
       showDamageOverlay();
       if(GAME.health <= 0) {
-        if(isPvpMultiplayerRoom()) beginRespawnCountdown();
-        else gameOver();
+        if(isPvpMultiplayerRoom()) {
+          if(isMultiplayer1v1RoomMode()) begin1v1RoundDeath();
+          else beginRespawnCountdown();
+        } else gameOver();
       }
     }
   }
@@ -3387,13 +3510,13 @@ function handleMultiplayerPlayerHit(payload) {
 
   if(payload.killed && myId && aid && aid === myId && tid && tid !== myId) {
     showKillFeed(getMpPlayerNickname(tid), isHeadshotKill);
-    if(isPvpMultiplayerRoom()) {
-      GAME.kills++;
-      if(isHeadshotKill) GAME.headshots++;
-      updateKillCounter(isHeadshotKill);
-      updateScoreUI();
-    }
   }
+  if(isPvpMultiplayerRoom()) {
+    const localGotKill = !!(payload.killed && myId && aid === myId && tid && tid !== myId);
+    syncLocalHudStatsFromMultiplayerData(localGotKill && isHeadshotKill);
+  }
+
+  if(tabScoreboardHeld) refreshTabScoreboardTable();
 }
 
 function getTeamSpawnUvList() {
@@ -3440,6 +3563,16 @@ function minDistToRemoteHumansAt(x, z) {
   return m;
 }
 
+/** 1v1：与存活对手水平距离须大于此值（米），禁止出生/复活叠在同一标定点 */
+const PVP_1V1_MIN_SPAWN_SEPARATION = 5;
+
+function pvp1v1RemoteSpawnClearanceMin(baseNpcOrRemote) {
+  const b = Number(baseNpcOrRemote) || 0;
+  if(isMultiplayer1v1RoomMode() && isPvpMultiplayerRoom())
+    return Math.max(b, PVP_1V1_MIN_SPAWN_SEPARATION);
+  return b;
+}
+
 /**
  * PVP：在本队所有合法 UV 出生区中随机顺序尝试（避免固定两个点轮换）。
  */
@@ -3463,8 +3596,10 @@ function tryPickFromTeamSpawnListRandom(minNpcDist) {
       const x = p.x;
       const z = p.z;
       if(!dust2PlayerSpawnValid(x, z)) continue;
-      if(minNpcDist > 0 && minDistToAnyNpcAt(x, z) <= minNpcDist) continue;
-      if(minNpcDist > 0 && minDistToRemoteHumansAt(x, z) <= minNpcDist) continue;
+      const npcMin = minNpcDist;
+      const remoteMin = pvp1v1RemoteSpawnClearanceMin(minNpcDist);
+      if(npcMin > 0 && minDistToAnyNpcAt(x, z) <= npcMin) continue;
+      if(remoteMin > 0 && minDistToRemoteHumansAt(x, z) <= remoteMin) continue;
       return new THREE.Vector3(x, 0, z);
     }
   }
@@ -3497,6 +3632,8 @@ function tryPickFromTeamSpawnList(minNpcDist) {
       const z = p.z;
       if(!dust2PlayerSpawnValid(x, z)) continue;
       if(minNpcDist > 0 && minDistToAnyNpcAt(x, z) <= minNpcDist) continue;
+      const remoteMinTs = pvp1v1RemoteSpawnClearanceMin(minNpcDist);
+      if(remoteMinTs > 0 && minDistToRemoteHumansAt(x, z) <= remoteMinTs) continue;
       return new THREE.Vector3(x, 0, z);
     }
   }
@@ -3522,6 +3659,8 @@ function tryPickFromFixedSpawnPoints(minEnemyDist) {
       }
       if(md <= minEnemyDist) continue;
     }
+    const remoteMinFx = pvp1v1RemoteSpawnClearanceMin(0);
+    if(remoteMinFx > 0 && minDistToRemoteHumansAt(x, z) <= remoteMinFx) continue;
     return new THREE.Vector3(x, 0, z);
   }
   return null;
@@ -3585,7 +3724,8 @@ function pickRandomDust2WorldSpawnXZ() {
         }
         if(md <= minEnemy) continue;
       }
-      if(minRemote > 0 && minDistToRemoteHumansAt(x, z) <= minRemote) continue;
+      const effRemote = pvp1v1RemoteSpawnClearanceMin(minRemote);
+      if(effRemote > 0 && minDistToRemoteHumansAt(x, z) <= effRemote) continue;
       return new THREE.Vector3(x, 0, z);
     }
     return null;
@@ -3596,6 +3736,20 @@ function pickRandomDust2WorldSpawnXZ() {
   if(!p) p = tryWith(5, 5, false);
   if(!p) p = tryWith(0, 0, false);
   if(!p) {
+    if(isMultiplayer1v1RoomMode() && isPvpMultiplayerRoom()) {
+      let best = null;
+      let bestD = -1;
+      for(let i = 0; i < list.length; i++) {
+        const { x, z } = list[i];
+        const d = minDistToRemoteHumansAt(x, z);
+        if(d <= PVP_1V1_MIN_SPAWN_SEPARATION) continue;
+        if(d > bestD) {
+          bestD = d;
+          best = { x, z };
+        }
+      }
+      if(best) return new THREE.Vector3(best.x, 0, best.z);
+    }
     const k = Math.floor(Math.random() * list.length);
     const { x, z } = list[k];
     return new THREE.Vector3(x, 0, z);
@@ -3657,6 +3811,10 @@ function pickDust2SpawnXZForPlayer() {
         const dist = Math.hypot(x - enemy.group.position.x, z - enemy.group.position.z);
         minDist = Math.min(minDist, dist);
       }
+      {
+        const rr = pvp1v1RemoteSpawnClearanceMin(0);
+        if(rr > 0 && minDistToRemoteHumansAt(x, z) <= rr) continue;
+      }
       if(minDist > 5) return new THREE.Vector3(x, 0, z);
     }
   }
@@ -3670,6 +3828,10 @@ function pickDust2SpawnXZForPlayer() {
       for(const enemy of enemies) {
         minDist = Math.min(minDist, Math.hypot(x - enemy.group.position.x, z - enemy.group.position.z));
       }
+      {
+        const rr = pvp1v1RemoteSpawnClearanceMin(0);
+        if(rr > 0 && minDistToRemoteHumansAt(x, z) <= rr) continue;
+      }
       if(minDist > 3.5) return new THREE.Vector3(x, 0, z);
     }
   }
@@ -3678,7 +3840,12 @@ function pickDust2SpawnXZForPlayer() {
     const uv = uvs[i];
     for(let t = 0; t < perUv; t++) {
       const { x, z } = dust2UvWorldXZ(b, uv, jitter * 0.55);
-      if(dust2PlayerSpawnValid(x, z)) return new THREE.Vector3(x, 0, z);
+      if(!dust2PlayerSpawnValid(x, z)) continue;
+      {
+        const rr = pvp1v1RemoteSpawnClearanceMin(0);
+        if(rr > 0 && minDistToRemoteHumansAt(x, z) <= rr) continue;
+      }
+      return new THREE.Vector3(x, 0, z);
     }
   }
 
@@ -3694,6 +3861,10 @@ function pickDust2SpawnXZForPlayer() {
     for(const enemy of enemies) {
       minDist = Math.min(minDist, Math.hypot(x - enemy.group.position.x, z - enemy.group.position.z));
     }
+    {
+      const rr = pvp1v1RemoteSpawnClearanceMin(0);
+      if(rr > 0 && minDistToRemoteHumansAt(x, z) <= rr) continue;
+    }
     if(minDist > 4) return new THREE.Vector3(x, 0, z);
   }
 
@@ -3703,7 +3874,12 @@ function pickDust2SpawnXZForPlayer() {
     const { u: uu, v: vv } = applyUvFlip(u, v);
     const x = b.min.x + uu * (b.max.x - b.min.x);
     const z = b.min.z + vv * (b.max.z - b.min.z);
-    if(dust2PlayerSpawnValid(x, z)) return new THREE.Vector3(x, 0, z);
+    if(!dust2PlayerSpawnValid(x, z)) continue;
+    {
+      const rr = pvp1v1RemoteSpawnClearanceMin(0);
+      if(rr > 0 && minDistToRemoteHumansAt(x, z) <= rr) continue;
+    }
+    return new THREE.Vector3(x, 0, z);
   }
 
   return pickDust2SpawnXZEmergencySafe();
@@ -3865,6 +4041,10 @@ function getRandomSpawnPos() {
       minDist = Math.min(minDist, dist);
     }
     
+    if(isMultiplayer1v1RoomMode() && isPvpMultiplayerRoom()) {
+      const rm = pvp1v1RemoteSpawnClearanceMin(0);
+      if(rm > 0 && minDistToRemoteHumansAt(x, z) <= rm) continue;
+    }
     // If far enough from enemies and not in wall, use this position
     if(minDist > 8 && !isInsideWall(x, z)) {
       return new THREE.Vector3(x, 0, z);
@@ -3879,7 +4059,8 @@ function getRandomSpawnPos() {
 function dust2WorldRespawnFiltersOk(x, z, minNpc, requirePlausibleFeet) {
   if(requirePlausibleFeet && !dust2WorldSpawnFeetPlausible(x, z)) return false;
   if(minNpc > 0 && minDistToAnyNpcAt(x, z) <= minNpc) return false;
-  if(minNpc > 0 && minDistToRemoteHumansAt(x, z) <= minNpc) return false;
+  const remoteMin = pvp1v1RemoteSpawnClearanceMin(minNpc);
+  if(remoteMin > 0 && minDistToRemoteHumansAt(x, z) <= remoteMin) return false;
   return true;
 }
 
@@ -3971,9 +4152,14 @@ function getRandomSpawnPosForRespawn() {
       samples.push(getRandomSpawnPos());
     }
     if(oneV1 && samples.length) {
+      const rm0 = pvp1v1RemoteSpawnClearanceMin(0);
+      const pool = rm0 > 0
+        ? samples.filter((p) => minDistToRemoteHumansAt(p.x, p.z) > rm0)
+        : samples;
+      const useSamples = pool.length ? pool : samples;
       let dMin = Infinity;
       let dMax = -Infinity;
-      const ds = samples.map((p) => {
+      const ds = useSamples.map((p) => {
         const d = Math.hypot(p.x - ax, p.z - az);
         dMin = Math.min(dMin, d);
         dMax = Math.max(dMax, d);
@@ -4027,9 +4213,14 @@ function getRandomSpawnPosForRespawn() {
     for(let i = 0; i < 36; i++) {
       samples.push(pickDust2SpawnXZForPlayer());
     }
+    const rm0b = pvp1v1RemoteSpawnClearanceMin(0);
+    const poolB = rm0b > 0
+      ? samples.filter((p) => minDistToRemoteHumansAt(p.x, p.z) > rm0b)
+      : samples;
+    const useB = poolB.length ? poolB : samples;
     let dMin = Infinity;
     let dMax = -Infinity;
-    const ds = samples.map((p) => {
+    const ds = useB.map((p) => {
       const d = Math.hypot(p.x - ax, p.z - az);
       dMin = Math.min(dMin, d);
       dMax = Math.max(dMax, d);
@@ -4206,6 +4397,10 @@ function setupEvents() {
     }
     if(e.code === 'KeyP' && GAME.running && !GAME.paused && !e.repeat) thirdPerson = !thirdPerson;
     if(e.code === 'Escape' && GAME.running) togglePause();
+    if(e.code === 'Tab' && roomAllowsTabScoreboard()) {
+      e.preventDefault();
+      if(!e.repeat) setTabScoreboardVisible(true);
+    }
   });
 
   document.addEventListener('keyup', e => {
@@ -4216,6 +4411,7 @@ function setupEvents() {
     if(e.code === 'KeyD') moveRight = false;
     if(e.code === 'ShiftLeft' || e.code === 'ShiftRight') isSprinting = false;
     if(e.code === 'ControlLeft' || e.code === 'ControlRight' || e.code === 'KeyC') isCrouching = false;
+    if(e.code === 'Tab') setTabScoreboardVisible(false);
   });
 
   document.addEventListener('mousedown', e => {
@@ -4322,6 +4518,11 @@ function setupEvents() {
       viewmodelCamera.updateProjectionMatrix();
     }
     renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  window.addEventListener('blur', () => setTabScoreboardVisible(false));
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState !== 'visible') setTabScoreboardVisible(false);
   });
 }
 
@@ -5976,6 +6177,222 @@ function showDamageOverlay() {
 // ============================================================
 // MINIMAP
 // ============================================================
+/** 自场景俯视渲染的底图（优先于静态 SVG） */
+let minimapWorldCanvas = null;
+let minimapWorldCaptureQueued = false;
+
+let minimapThumbImg = null;
+let minimapThumbReadyUrl = '';
+let minimapThumbInFlightUrl = '';
+let minimapThumbLoadFailedUrl = '';
+
+const MINIMAP_WORLD_RT_SIZE = 512;
+
+function pushMinimapSceneVisibilityStash() {
+  const stash = [];
+  const hide = (o) => {
+    if(!o) return;
+    stash.push({ o, v: o.visible });
+    o.visible = false;
+  };
+  hide(bulletDecalsGroup);
+  hide(thirdPersonWeaponRoot);
+  if(GAME.dustPoints) hide(GAME.dustPoints);
+  let i;
+  for(i = 0; i < enemies.length; i++) hide(enemies[i].group);
+  remotePlayerMap.forEach((e) => {
+    hide(e.group);
+    hide(e.weaponSceneRoot);
+    hide(e.dropWeaponGroup);
+  });
+  for(i = 0; i < worldWeaponDrops.length; i++) hide(worldWeaponDrops[i]);
+  for(i = 0; i < particles.length; i++) hide(particles[i].mesh);
+  for(i = 0; i < muzzleFlashes.length; i++) hide(muzzleFlashes[i].mesh);
+  for(i = 0; i < playerTracers.length; i++) hide(playerTracers[i].mesh);
+  for(i = 0; i < headshotFx.length; i++) hide(headshotFx[i].group);
+  if(scene) {
+    scene.traverse((ch) => {
+      /** 远端克隆曾复制 isLocalPlayerAvatar，勿当作本地模型隐藏，否则对方人物会消失 */
+      if(ch.userData && ch.userData.isLocalPlayerAvatar && !ch.userData.isRemotePlayerAvatar) hide(ch);
+    });
+  }
+  return function restoreMinimapSceneVisibility() {
+    for(i = 0; i < stash.length; i++) stash[i].o.visible = stash[i].v;
+  };
+}
+
+function scheduleMinimapWorldCapture() {
+  if(minimapWorldCanvas || minimapWorldCaptureQueued) return;
+  if(!renderer || !scene) return;
+  minimapWorldCaptureQueued = true;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      minimapWorldCaptureQueued = false;
+      tryCaptureMinimapFromWorld();
+    });
+  });
+}
+
+function tryCaptureMinimapFromWorld() {
+  if(minimapWorldCanvas || !renderer || !scene || !(mapHalfBound > 0)) return;
+  const SIZE = MINIMAP_WORLD_RT_SIZE;
+  const h = mapHalfBound;
+  const rt = new THREE.WebGLRenderTarget(SIZE, SIZE, {
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    depthBuffer: true,
+    stencilBuffer: false,
+  });
+  const orthoCam = new THREE.OrthographicCamera(-h, h, h, -h, Math.max(0.5, h * 0.12), h * 24);
+  orthoCam.position.set(0, h * 6, 0);
+  orthoCam.lookAt(0, 0, 0);
+  orthoCam.updateProjectionMatrix();
+
+  const restoreVis = pushMinimapSceneVisibilityStash();
+  const prevFog = scene.fog;
+  const prevBg = scene.background;
+  scene.fog = null;
+  scene.background = new THREE.Color(0x1e1c1a);
+
+  const prevTarget = renderer.getRenderTarget();
+  const prevV = new THREE.Vector4();
+  renderer.getViewport(prevV);
+  const prevShadow = renderer.shadowMap.enabled;
+
+  try {
+    renderer.shadowMap.enabled = false;
+    renderer.setRenderTarget(rt);
+    renderer.setViewport(0, 0, SIZE, SIZE);
+    renderer.clear(true, true, true);
+    renderer.render(scene, orthoCam);
+  } catch(err) {
+    console.warn('[minimap] 俯视渲染失败', err);
+    rt.dispose();
+    scene.fog = prevFog;
+    scene.background = prevBg;
+    restoreVis();
+    renderer.setRenderTarget(prevTarget);
+    renderer.setViewport(prevV.x, prevV.y, prevV.z, prevV.w);
+    renderer.shadowMap.enabled = prevShadow;
+    return;
+  }
+
+  renderer.setRenderTarget(prevTarget);
+  renderer.setViewport(prevV.x, prevV.y, prevV.z, prevV.w);
+  renderer.shadowMap.enabled = prevShadow;
+
+  scene.fog = prevFog;
+  scene.background = prevBg;
+  restoreVis();
+
+  try {
+    const pixels = new Uint8Array(SIZE * SIZE * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, SIZE, SIZE, pixels);
+    const out = document.createElement('canvas');
+    out.width = SIZE;
+    out.height = SIZE;
+    const octx = out.getContext('2d');
+    const imgData = octx.createImageData(SIZE, SIZE);
+    let x;
+    let y;
+    for(y = 0; y < SIZE; y++) {
+      for(x = 0; x < SIZE; x++) {
+        const srcI = (y * SIZE + x) * 4;
+        const dstI = ((SIZE - 1 - y) * SIZE + x) * 4;
+        imgData.data[dstI] = pixels[srcI];
+        imgData.data[dstI + 1] = pixels[srcI + 1];
+        imgData.data[dstI + 2] = pixels[srcI + 2];
+        imgData.data[dstI + 3] = pixels[srcI + 3];
+      }
+    }
+    octx.putImageData(imgData, 0, 0);
+    minimapWorldCanvas = out;
+  } catch(err) {
+    console.warn('[minimap] 读取渲染目标失败', err);
+  }
+  rt.dispose();
+}
+
+function getActiveMapKeyForMinimap() {
+  if(multiplayerData && multiplayerData.settings && multiplayerData.settings.map)
+    return String(multiplayerData.settings.map);
+  return GAME.useDust2GlbMap ? 'desert' : 'warehouse';
+}
+
+function minimapThumbUrlForMapKey(mapKey) {
+  return mapKey === 'warehouse' ? 'assets/maps/minimap_warehouse.svg' : 'assets/maps/minimap_desert.svg';
+}
+
+function ensureMinimapThumbLoaded() {
+  if(minimapWorldCanvas) return;
+  const url = minimapThumbUrlForMapKey(getActiveMapKeyForMinimap());
+  if(minimapThumbLoadFailedUrl === url) return;
+  if(minimapThumbReadyUrl === url && minimapThumbImg && minimapThumbImg.complete && minimapThumbImg.naturalWidth > 0) return;
+  if(minimapThumbInFlightUrl === url) return;
+  minimapThumbInFlightUrl = url;
+  const im = new Image();
+  im.onload = () => {
+    if(minimapThumbInFlightUrl === url) {
+      minimapThumbImg = im;
+      minimapThumbReadyUrl = url;
+      minimapThumbLoadFailedUrl = '';
+    }
+    minimapThumbInFlightUrl = '';
+  };
+  im.onerror = () => {
+    if(minimapThumbInFlightUrl === url) {
+      minimapThumbImg = null;
+      minimapThumbReadyUrl = '';
+      minimapThumbLoadFailedUrl = url;
+    }
+    minimapThumbInFlightUrl = '';
+  };
+  im.src = url;
+}
+
+function updateMinimapLabelForMap() {
+  const el = document.getElementById('minimap-label');
+  if(!el) return;
+  const key = getActiveMapKeyForMinimap();
+  el.textContent = key === 'warehouse' ? '仓库突袭' : '沙漠2';
+}
+
+function isPvp1v1OpponentRevealOnMinimapActive() {
+  if(!isMultiplayer1v1RoomMode() || !isPvpMultiplayerRoom()) return false;
+  if(pvpMatchEnded) return false;
+  if(!GAME.running || GAME.paused) return false;
+  /** 加时：独立时间轴，每 10s 亮 1s（与顶栏「加时」显示一致，与常规 30s/3s 分开） */
+  if(pvp1v1OvertimeActive) {
+    if(pvp1v1OvertimeRevealEpochMs <= 0) return false;
+    const ot = performance.now() - pvp1v1OvertimeRevealEpochMs;
+    if(!Number.isFinite(ot) || ot < 0) return false;
+    const ph = ot % PVP_1V1_OT_REVEAL_EVERY_MS;
+    return ph < PVP_1V1_OT_REVEAL_FOR_MS;
+  }
+  if(pvp1v1MinimapRevealEpochMs <= 0) return false;
+  const t = performance.now() - pvp1v1MinimapRevealEpochMs;
+  if(!Number.isFinite(t) || t < 0) return false;
+  const phase = t % PVP_1V1_MINIMAP_REVEAL_EVERY_MS;
+  return phase < PVP_1V1_MINIMAP_REVEAL_FOR_MS;
+}
+
+function drawPvp1v1OvertimeOpponentBlip(ctx, scale) {
+  const localSid = multiplayerData && multiplayerData.localSocketId;
+  remotePlayerMap.forEach((entry, socketId) => {
+    if(localSid && socketId === localSid) return;
+    if(entry.dead) return;
+    const ox = (entry.curPos.x + mapHalfBound) * scale;
+    const oz = (entry.curPos.z + mapHalfBound) * scale;
+    ctx.fillStyle = 'rgba(255, 60, 60, 0.95)';
+    ctx.beginPath();
+    ctx.arc(ox, oz, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+  });
+}
+
 function updateMinimap() {
   const canvas = document.getElementById('minimap-canvas');
   const ctx = canvas.getContext('2d');
@@ -5983,14 +6400,22 @@ function updateMinimap() {
   const mapExtent = mapHalfBound * 2;
   const scale = w / mapExtent;
 
-  ctx.clearRect(0,0,w,h);
+  ctx.clearRect(0, 0, w, h);
 
-  // Background
-  ctx.fillStyle = 'rgba(10,10,15,0.8)';
-  ctx.fillRect(0,0,w,h);
+  if(minimapWorldCanvas) {
+    ctx.drawImage(minimapWorldCanvas, 0, 0, w, h);
+    ctx.fillStyle = 'rgba(8, 10, 18, 0.32)';
+    ctx.fillRect(0, 0, w, h);
+  } else if(minimapThumbImg && minimapThumbImg.complete && minimapThumbImg.naturalWidth > 0) {
+    ctx.drawImage(minimapThumbImg, 0, 0, w, h);
+    ctx.fillStyle = 'rgba(8, 10, 18, 0.42)';
+    ctx.fillRect(0, 0, w, h);
+  } else {
+    ctx.fillStyle = 'rgba(10,10,15,0.8)';
+    ctx.fillRect(0, 0, w, h);
+  }
 
-  // Map objects
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
   mapObjects.forEach(obj => {
     if(!obj.box) return;
     const b = obj.box;
@@ -5998,10 +6423,9 @@ function updateMinimap() {
     const mz = (b.min.z + mapHalfBound) * scale;
     const mw = (b.max.x - b.min.x) * scale;
     const mh = (b.max.z - b.min.z) * scale;
-    ctx.fillRect(mx, mz, Math.max(mw,1), Math.max(mh,1));
+    ctx.fillRect(mx, mz, Math.max(mw, 1), Math.max(mh, 1));
   });
 
-  // Enemies / 友军单位（同队 AI）用小地图蓝点
   enemies.forEach(enemy => {
     if(enemy.dead) return;
     const ex = (enemy.group.position.x + mapHalfBound) * scale;
@@ -6015,11 +6439,13 @@ function updateMinimap() {
     ctx.fill();
   });
 
-  // Player
   const px = (camera.position.x + mapHalfBound) * scale;
   const pz = (camera.position.z + mapHalfBound) * scale;
 
-  // Player direction
+  if(isPvp1v1OpponentRevealOnMinimapActive()) {
+    drawPvp1v1OvertimeOpponentBlip(ctx, scale);
+  }
+
   ctx.strokeStyle = '#00ff88';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -6028,7 +6454,6 @@ function updateMinimap() {
   ctx.lineTo(px - Math.sin(yaw)*dirLen, pz - Math.cos(yaw)*dirLen);
   ctx.stroke();
 
-  // Player dot
   ctx.fillStyle = '#00ff88';
   ctx.beginPath();
   ctx.arc(px, pz, 3, 0, Math.PI*2);
@@ -6496,7 +6921,7 @@ function updatePlayer(dt) {
     shoot();
   }
 
-  // Health regen（单机）；PVP 血量仅由服务端广播同步，本地不回血以免与结算不一致
+  // Health regen：仅单机。联机 PVP（含 1v1）禁止自动回血，血量只随服务端命中同步，与回合/计时血量判胜一致
   if(!isPvpMultiplayerRoom() && GAME.health < GAME.maxHealth && GAME.health > 0) {
     GAME.health = Math.min(GAME.maxHealth, GAME.health + 0.5 * dt);
     updateHealthUI();
@@ -6868,8 +7293,10 @@ function enemyShoot(enemy, dist) {
     updateHealthUI();
 
     if(GAME.health <= 0) {
-      if(isPvpMultiplayerRoom()) beginRespawnCountdown();
-      else gameOver();
+      if(isPvpMultiplayerRoom()) {
+        if(isMultiplayer1v1RoomMode()) begin1v1RoundDeath();
+        else beginRespawnCountdown();
+      } else gameOver();
     }
   }
 
@@ -6998,6 +7425,9 @@ async function startGame() {
   if(!audioCtx) await initAudio();
 
   setupPvpMatchTimerForStart();
+
+  updateMinimapLabelForMap();
+  ensureMinimapThumbLoaded();
 
   renderer.domElement.requestPointerLock();
 }
@@ -7375,10 +7805,25 @@ function isPvpMultiplayerRoom() {
   return true;
 }
 
-/** PVP 单局时长（毫秒），默认 5 分钟 */
-const PVP_MATCH_DURATION_MS = 5 * 60 * 1000;
-let pvpMatchEndAtMs = 0;
+/** PVP 单局时长兜底（秒），与房间 settings.roundTime 缺省一致 */
+const PVP_MATCH_DURATION_FALLBACK_SEC = 120;
+/** 对局结束时刻（墙钟 ms，与 performance.now 无关，便于晚进房与全端对齐） */
+let pvpMatchEndWallClockMs = 0;
 let pvpMatchEnded = false;
+/** 1v1：当前回合结束时刻（墙钟 ms） */
+let pvpRoundEndWallClockMs = 0;
+/** 1v1：本回合是否已上报 roundTimeUp（仅房主上报，双方 UI 归零后防重复） */
+let pvpRoundTimeUpReported = false;
+/** 1v1：常规时间同血进入加时，无倒计时直至一方被击杀 */
+let pvp1v1OvertimeActive = false;
+/** 1v1 常规回合：小地图暴露对方（开局/新回合重置；每 30s 亮 3s） */
+let pvp1v1MinimapRevealEpochMs = 0;
+const PVP_1V1_MINIMAP_REVEAL_EVERY_MS = 30000;
+const PVP_1V1_MINIMAP_REVEAL_FOR_MS = 3000;
+/** 1v1 加时：小地图雷达单独计时（每 10s 亮 1s） */
+let pvp1v1OvertimeRevealEpochMs = 0;
+const PVP_1V1_OT_REVEAL_EVERY_MS = 10000;
+const PVP_1V1_OT_REVEAL_FOR_MS = 1000;
 /** 时间到后自动返回房间页的定时器 */
 let pvpAutoReturnToRoomTimer = null;
 
@@ -7387,9 +7832,34 @@ function resetPvpMatchTimerState() {
     clearTimeout(pvpAutoReturnToRoomTimer);
     pvpAutoReturnToRoomTimer = null;
   }
-  pvpMatchEndAtMs = 0;
+  pvpMatchEndWallClockMs = 0;
+  pvpRoundEndWallClockMs = 0;
+  pvpRoundTimeUpReported = false;
+  pvp1v1OvertimeActive = false;
+  pvp1v1MinimapRevealEpochMs = 0;
+  pvp1v1OvertimeRevealEpochMs = 0;
   pvpMatchEnded = false;
   document.body.classList.remove('pvp-match-active');
+  const label = document.getElementById('pvp-match-timer-label');
+  if(label) label.textContent = '对局时间';
+  const hCt = document.getElementById('pvp-hud-ct-num');
+  const hT = document.getElementById('pvp-hud-t-num');
+  if(hCt) hCt.textContent = '0';
+  if(hT) hT.textContent = '0';
+  const res = document.getElementById('pvp-end-result');
+  if(res) {
+    res.style.display = 'none';
+    res.textContent = '';
+    res.className = 'pvp-end-result';
+  }
+  const board = document.getElementById('pvp-end-match-board');
+  if(board) board.style.display = 'none';
+  const statsBody = document.getElementById('pvp-end-stats-body');
+  if(statsBody) statsBody.innerHTML = '';
+  const ctNum = document.getElementById('pvp-end-ct-num');
+  const tNum = document.getElementById('pvp-end-t-num');
+  if(ctNum) ctNum.textContent = '0';
+  if(tNum) tNum.textContent = '0';
   const wrap = document.getElementById('pvp-match-timer-wrap');
   if(wrap) {
     wrap.classList.remove('visible', 'pvp-timer-low');
@@ -7398,12 +7868,111 @@ function resetPvpMatchTimerState() {
   }
   const end = document.getElementById('pvp-match-end-overlay');
   if(end) end.style.display = 'none';
+  const clockReset = document.getElementById('pvp-match-timer');
+  if(clockReset) clockReset.classList.remove('pvp-timer-ot-text');
+}
+
+/** 顶栏 CT / T 回合分（与 CS:GO 类似，时间在中间、比分在两侧） */
+function syncPvpTopBarTeamScores() {
+  if(!isPvpMultiplayerRoom()) return;
+  const gs = multiplayerData && multiplayerData.gameState;
+  const ct = gs ? Number(gs.ctScore) : NaN;
+  const tt = gs ? Number(gs.tScore) : NaN;
+  const ctN = Number.isFinite(ct) ? Math.max(0, Math.floor(ct)) : 0;
+  const ttN = Number.isFinite(tt) ? Math.max(0, Math.floor(tt)) : 0;
+  const elCt = document.getElementById('pvp-hud-ct-num');
+  const elT = document.getElementById('pvp-hud-t-num');
+  if(elCt) elCt.textContent = String(ctN);
+  if(elT) elT.textContent = String(ttN);
+}
+
+function updatePvp1v1ScoreFromMultiplayerData() {
+  syncPvpTopBarTeamScores();
+}
+
+function getPvpMatchDurationSecFromSettings() {
+  const rt = multiplayerData && multiplayerData.settings && multiplayerData.settings.roundTime;
+  const n = Number(rt);
+  if(Number.isFinite(n) && n > 0) return Math.min(3600, Math.max(30, Math.floor(n)));
+  return PVP_MATCH_DURATION_FALLBACK_SEC;
+}
+
+function parseMultiplayerMatchStartWallClockMs() {
+  const gs = multiplayerData && multiplayerData.gameState;
+  const st = gs && gs.startTime;
+  if(st == null || st === '') return null;
+  const t = st instanceof Date ? st.getTime() : new Date(st).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+/** 1v1：优先 roundStartTime（每回合更新），否则回退 startTime（首回合） */
+function parse1v1RoundStartWallClockMs() {
+  const gs = multiplayerData && multiplayerData.gameState;
+  if(!gs) return null;
+  const rs = gs.roundStartTime;
+  if(rs != null && rs !== '') {
+    const t = rs instanceof Date ? rs.getTime() : new Date(rs).getTime();
+    if(Number.isFinite(t)) return t;
+  }
+  return parseMultiplayerMatchStartWallClockMs();
+}
+
+/**
+ * 按服务端写入的锚点刷新倒计时终点（不重置胜负/加时状态）。
+ * 用于：开局 setup、父页重复 init、socket 重连后同步。
+ */
+function applyPvpTimerAnchorsFromMultiplayerData() {
+  if(!isPvpMultiplayerRoom() || pvpMatchEnded) return;
+  if(multiplayerData?.gameState?.status !== 'playing') return;
+  const durSec = getPvpMatchDurationSecFromSettings();
+  if(isMultiplayer1v1RoomMode()) {
+    if(pvp1v1OvertimeActive) {
+      syncPvpTopBarTeamScores();
+      return;
+    }
+    pvpMatchEndWallClockMs = 0;
+    const rs = parse1v1RoundStartWallClockMs();
+    if(rs != null) {
+      pvpRoundEndWallClockMs = rs + durSec * 1000;
+    } else {
+      pvpRoundEndWallClockMs = Date.now() + durSec * 1000;
+    }
+  } else {
+    const startMs = parseMultiplayerMatchStartWallClockMs();
+    if(startMs != null) {
+      pvpMatchEndWallClockMs = startMs + durSec * 1000;
+    } else {
+      pvpMatchEndWallClockMs = Date.now() + durSec * 1000;
+    }
+  }
+  syncPvpTopBarTeamScores();
+  updatePvpMatchTimerDisplay();
 }
 
 function setupPvpMatchTimerForStart() {
   if(!isPvpMultiplayerRoom()) return;
-  pvpMatchEndAtMs = performance.now() + PVP_MATCH_DURATION_MS;
   pvpMatchEnded = false;
+  if(isMultiplayer1v1RoomMode()) {
+    pvpMatchEndWallClockMs = 0;
+    pvp1v1OvertimeActive = false;
+    pvp1v1OvertimeRevealEpochMs = 0;
+    pvp1v1MinimapRevealEpochMs = performance.now();
+    pvpRoundTimeUpReported = false;
+    document.body.classList.add('pvp-match-active');
+    const lbl = document.getElementById('pvp-match-timer-label');
+    if(lbl) lbl.textContent = '回合时间';
+    const wrap = document.getElementById('pvp-match-timer-wrap');
+    if(wrap) {
+      wrap.style.display = 'flex';
+      wrap.classList.add('visible');
+      wrap.setAttribute('aria-hidden', 'false');
+    }
+    updatePvp1v1ScoreFromMultiplayerData();
+    applyPvpTimerAnchorsFromMultiplayerData();
+    return;
+  }
+  pvpRoundEndWallClockMs = 0;
+  pvpRoundTimeUpReported = false;
   document.body.classList.add('pvp-match-active');
   const wrap = document.getElementById('pvp-match-timer-wrap');
   if(wrap) {
@@ -7411,18 +7980,80 @@ function setupPvpMatchTimerForStart() {
     wrap.classList.add('visible');
     wrap.setAttribute('aria-hidden', 'false');
   }
+  applyPvpTimerAnchorsFromMultiplayerData();
+}
+
+function onPvpRoundTimeUpLocal() {
+  if(!isMultiplayer1v1RoomMode() || !isPvpMultiplayerRoom() || pvpMatchEnded) return;
+  if(pvpRoundTimeUpReported) return;
+  pvpRoundTimeUpReported = true;
+  pvpRoundEndWallClockMs = 0;
+  const clock = document.getElementById('pvp-match-timer');
+  if(clock) {
+    clock.classList.remove('pvp-timer-ot-text');
+    clock.textContent = '0:00';
+  }
+  if(GAME.playerIsHost && multiplayerData && multiplayerData.roomId) {
+    window.parent.postMessage({ type: 'mp-round-timeup', roomId: multiplayerData.roomId }, '*');
+  }
+}
+
+function handle1v1OvertimeMessage() {
+  if(!multiplayerData || !isMultiplayer1v1RoomMode() || !isPvpMultiplayerRoom() || pvpMatchEnded) return;
+  pvp1v1OvertimeActive = true;
+  pvp1v1OvertimeRevealEpochMs = performance.now();
+  const wrap = document.getElementById('pvp-match-timer-wrap');
+  if(wrap) {
+    wrap.style.display = 'flex';
+    wrap.classList.add('visible', 'pvp-timer-low');
+    wrap.setAttribute('aria-hidden', 'false');
+  }
   updatePvpMatchTimerDisplay();
 }
 
 function updatePvpMatchTimerDisplay() {
-  if(!pvpMatchEndAtMs || !isPvpMultiplayerRoom() || pvpMatchEnded) return;
-  const remain = Math.max(0, pvpMatchEndAtMs - performance.now());
+  if(!isPvpMultiplayerRoom() || pvpMatchEnded) return;
+  const clock = document.getElementById('pvp-match-timer');
+  const wrap = document.getElementById('pvp-match-timer-wrap');
+  if(isMultiplayer1v1RoomMode()) {
+    if(pvp1v1OvertimeActive) {
+      const lbl = document.getElementById('pvp-match-timer-label');
+      if(lbl) lbl.textContent = '加时赛';
+      if(clock) {
+        clock.textContent = '加时';
+        clock.classList.add('pvp-timer-ot-text');
+      }
+      if(wrap) {
+        wrap.style.display = 'flex';
+        wrap.classList.add('visible', 'pvp-timer-low');
+        wrap.setAttribute('aria-hidden', 'false');
+      }
+      return;
+    }
+    if(!pvpRoundEndWallClockMs) return;
+    const remain = Math.max(0, pvpRoundEndWallClockMs - Date.now());
+    const totalSec = Math.floor(remain / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    if(clock) {
+      clock.classList.remove('pvp-timer-ot-text');
+      clock.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+    }
+    if(wrap) wrap.classList.toggle('pvp-timer-low', totalSec <= 30 && totalSec > 0);
+    if(remain <= 0) {
+      onPvpRoundTimeUpLocal();
+    }
+    return;
+  }
+  if(!pvpMatchEndWallClockMs) return;
+  const remain = Math.max(0, pvpMatchEndWallClockMs - Date.now());
   const totalSec = Math.floor(remain / 1000);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
-  const clock = document.getElementById('pvp-match-timer');
-  if(clock) clock.textContent = `${m}:${s.toString().padStart(2, '0')}`;
-  const wrap = document.getElementById('pvp-match-timer-wrap');
+  if(clock) {
+    clock.classList.remove('pvp-timer-ot-text');
+    clock.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+  }
   if(wrap) wrap.classList.toggle('pvp-timer-low', totalSec <= 30 && totalSec > 0);
   if(remain <= 0) {
     pvpMatchEnded = true;
@@ -7443,7 +8074,24 @@ function onPvpMatchTimeUp() {
   const wrap = document.getElementById('pvp-match-timer-wrap');
   if(wrap) wrap.classList.add('pvp-timer-low');
   const clock = document.getElementById('pvp-match-timer');
-  if(clock) clock.textContent = '0:00';
+  if(clock) {
+    clock.classList.remove('pvp-timer-ot-text');
+    clock.textContent = '0:00';
+  }
+  const res = document.getElementById('pvp-end-result');
+  if(res) {
+    res.style.display = 'none';
+    res.textContent = '';
+    res.className = 'pvp-end-result';
+  }
+  const titleEl = document.getElementById('pvp-end-title');
+  if(titleEl) titleEl.textContent = '对局结束';
+  const subEl = document.getElementById('pvp-end-sub');
+  if(subEl) subEl.textContent = '时间已到 · 将返回房间，可再次开始游戏';
+  const board = document.getElementById('pvp-end-match-board');
+  if(board) board.style.display = 'none';
+  const statsBody = document.getElementById('pvp-end-stats-body');
+  if(statsBody) statsBody.innerHTML = '';
   const end = document.getElementById('pvp-match-end-overlay');
   if(end) end.style.display = 'flex';
   if(pvpAutoReturnToRoomTimer) {
@@ -7593,6 +8241,352 @@ function performRespawn() {
   renderer.domElement.requestPointerLock();
   postMultiplayerRespawnSync();
   startLocalSpawnProtectAfterRespawn();
+}
+
+function begin1v1RoundDeath() {
+  GAME.running = false;
+  localSpawnProtectUntil = 0;
+  cancelMeleeHeavyCharge();
+  clearHeadshotFx();
+  GAME.health = 0;
+  updateHealthUI();
+  awpScopeStage = 0;
+  doubleZoomBlend = 0;
+  scopeBlend = 0;
+  scopeZoomElapsed = 0;
+  isCrouching = false;
+  const ov = document.getElementById('scope-overlay');
+  const ch = document.getElementById('crosshair');
+  if(ov) ov.style.opacity = '0';
+  if(ch) ch.style.opacity = '1';
+  camera.fov = CAM_FOV_HIP;
+  camera.updateProjectionMatrix();
+  if(viewmodelCamera) {
+    viewmodelCamera.fov = VM_FOV_HIP;
+    viewmodelCamera.updateProjectionMatrix();
+  }
+  document.exitPointerLock();
+  respawnUntilMs = 0;
+  const ro = document.getElementById('respawn-overlay');
+  if(ro) {
+    ro.style.display = 'flex';
+    const cd = document.getElementById('respawn-countdown');
+    if(cd) cd.textContent = '回合结算';
+  }
+}
+
+function handle1v1RoundEndedMessage(data) {
+  if(!multiplayerData || !isMultiplayer1v1RoomMode()) return;
+  pvp1v1OvertimeActive = false;
+  pvp1v1OvertimeRevealEpochMs = 0;
+  pvp1v1MinimapRevealEpochMs = performance.now();
+  const lbl = document.getElementById('pvp-match-timer-label');
+  if(lbl) lbl.textContent = '回合时间';
+  const ct = Number(data.ctScore);
+  const tt = Number(data.tScore);
+  if(Number.isFinite(ct) && Number.isFinite(tt)) {
+    if(multiplayerData.gameState) {
+      multiplayerData.gameState.ctScore = ct;
+      multiplayerData.gameState.tScore = tt;
+      if(data.round != null) multiplayerData.gameState.round = data.round;
+    }
+  }
+  syncPvpTopBarTeamScores();
+  remotePlayerMap.forEach((_e, sid) => {
+    markRemotePlayerAlive(sid);
+  });
+  respawnUntilMs = 0;
+  const ro = document.getElementById('respawn-overlay');
+  if(ro) ro.style.display = 'none';
+  const cd = document.getElementById('respawn-countdown');
+  if(cd) cd.textContent = '5';
+  performRespawn();
+  const durSec = getPvpMatchDurationSecFromSettings();
+  let rsMs = null;
+  if(data.roundStartTime != null && data.roundStartTime !== '') {
+    const rt = data.roundStartTime instanceof Date ? data.roundStartTime.getTime() : new Date(data.roundStartTime).getTime();
+    if(Number.isFinite(rt)) rsMs = rt;
+  }
+  if(rsMs != null) {
+    pvpRoundEndWallClockMs = rsMs + durSec * 1000;
+    if(multiplayerData.gameState) {
+      multiplayerData.gameState.roundStartTime = data.roundStartTime;
+    }
+  } else {
+    pvpRoundEndWallClockMs = Date.now() + durSec * 1000;
+  }
+  pvpRoundTimeUpReported = false;
+  updatePvpMatchTimerDisplay();
+  if(tabScoreboardHeld) refreshTabScoreboardTable();
+}
+
+function formatPvpMatchKd(kills, deaths) {
+  const k = Number(kills) || 0;
+  const d = Number(deaths) || 0;
+  if(d === 0) return k === 0 ? '0.00' : k.toFixed(2);
+  return (k / d).toFixed(2);
+}
+
+/** 按住 Tab 时显示房间战绩表 */
+let tabScoreboardHeld = false;
+
+function roomAllowsTabScoreboard() {
+  return !!(multiplayerData && multiplayerData.roomId && GAME.running);
+}
+
+function refreshTabScoreboardTable() {
+  const body = document.getElementById('tab-scoreboard-body');
+  const scoresRow = document.getElementById('tab-scoreboard-scores');
+  if(!body || !multiplayerData || !multiplayerData.players) return;
+  const mode = multiplayerData.settings && multiplayerData.settings.mode;
+  if(scoresRow) {
+    if(String(mode) === 'pve') {
+      scoresRow.classList.remove('visible');
+    } else {
+      scoresRow.classList.add('visible');
+      const gs = multiplayerData.gameState || {};
+      const ct = Number(gs.ctScore) || 0;
+      const tt = Number(gs.tScore) || 0;
+      const ctEl = document.getElementById('tab-sb-ct');
+      const tEl = document.getElementById('tab-sb-t');
+      if(ctEl) ctEl.textContent = 'CT ' + ct;
+      if(tEl) tEl.textContent = 'T ' + tt;
+    }
+  }
+  const list = multiplayerData.players.slice();
+  list.sort((a, b) => {
+    const botA = a.isBot ? 1 : 0;
+    const botB = b.isBot ? 1 : 0;
+    if(botA !== botB) return botA - botB;
+    const ta = a.team === 'T' ? 1 : 0;
+    const tb = b.team === 'T' ? 1 : 0;
+    if(ta !== tb) return ta - tb;
+    return String(a.nickname || '').localeCompare(String(b.nickname || ''));
+  });
+  body.innerHTML = '';
+  const localPid = String(multiplayerData.playerId || '');
+  const localSock = getLocalMultiplayerSocketId();
+
+  for(let i = 0; i < list.length; i++) {
+    const p = list[i];
+    const st = p.stats || {};
+    const kills = Number(st.kills) || 0;
+    const deaths = Number(st.deaths) || 0;
+    const isMe =
+      !!(localPid && p.playerId && String(p.playerId) === localPid) ||
+      !!(localSock && p.odId && String(p.odId) === localSock);
+    const tr = document.createElement('tr');
+    if(isMe) tr.className = 'pvp-end-me';
+    const team = p.team === 'T' ? 'T' : 'CT';
+    const tdNick = document.createElement('td');
+    const nick = document.createElement('span');
+    nick.className = 'pvp-end-nick';
+    nick.textContent = String(p.nickname || '玩家');
+    tdNick.appendChild(nick);
+    const tdTeam = document.createElement('td');
+    const teamSpan = document.createElement('span');
+    teamSpan.className = team === 'CT' ? 'pvp-end-team-ct' : 'pvp-end-team-t';
+    teamSpan.textContent = team === 'CT' ? 'CT' : 'T';
+    tdTeam.appendChild(teamSpan);
+    const tdK = document.createElement('td');
+    tdK.className = 'col-num';
+    tdK.textContent = String(kills);
+    const tdD = document.createElement('td');
+    tdD.className = 'col-num';
+    tdD.textContent = String(deaths);
+    const tdKd = document.createElement('td');
+    tdKd.className = 'col-num';
+    tdKd.textContent = formatPvpMatchKd(kills, deaths);
+    const tdDmg = document.createElement('td');
+    tdDmg.className = 'col-num';
+    tdDmg.textContent = String(Math.round(Number(st.damage) || 0));
+    const tdSc = document.createElement('td');
+    tdSc.className = 'col-num';
+    tdSc.textContent = String(Math.round(Number(st.score) || 0));
+    const tdMvp = document.createElement('td');
+    tdMvp.className = 'col-num';
+    tdMvp.textContent = String(Math.round(Number(st.mvps) || 0));
+    const tdHs = document.createElement('td');
+    tdHs.className = 'col-num';
+    tdHs.textContent = String(Math.round(Number(st.headshots) || 0));
+    tr.appendChild(tdNick);
+    tr.appendChild(tdTeam);
+    tr.appendChild(tdK);
+    tr.appendChild(tdD);
+    tr.appendChild(tdKd);
+    tr.appendChild(tdDmg);
+    tr.appendChild(tdSc);
+    tr.appendChild(tdMvp);
+    tr.appendChild(tdHs);
+    body.appendChild(tr);
+  }
+}
+
+function setTabScoreboardVisible(show) {
+  const el = document.getElementById('tab-scoreboard-overlay');
+  if(!el) return;
+  tabScoreboardHeld = !!show;
+  if(show) {
+    el.classList.add('visible');
+    el.setAttribute('aria-hidden', 'false');
+    refreshTabScoreboardTable();
+  } else {
+    el.classList.remove('visible');
+    el.setAttribute('aria-hidden', 'true');
+  }
+}
+
+/** 结算页：总比分 + 个人战绩表（数据来自服务端 game:ended.players） */
+function fillPvpEndMatchBoardFromPayload(data) {
+  const ct = Number(data.ctScore) || 0;
+  const tt = Number(data.tScore) || 0;
+  const ctN = document.getElementById('pvp-end-ct-num');
+  const tN = document.getElementById('pvp-end-t-num');
+  if(ctN) ctN.textContent = String(ct);
+  if(tN) tN.textContent = String(tt);
+
+  const body = document.getElementById('pvp-end-stats-body');
+  const board = document.getElementById('pvp-end-match-board');
+  if(!body || !board) return;
+
+  const list = Array.isArray(data.players) ? data.players.slice() : [];
+  if(list.length === 0) {
+    board.style.display = 'none';
+    return;
+  }
+  board.style.display = 'block';
+  body.innerHTML = '';
+
+  list.sort((a, b) => {
+    const ta = a.team === 'T' ? 1 : 0;
+    const tb = b.team === 'T' ? 1 : 0;
+    if(ta !== tb) return ta - tb;
+    return String(a.nickname || '').localeCompare(String(b.nickname || ''));
+  });
+
+  const localPid = multiplayerData ? String(multiplayerData.playerId || '') : '';
+  const localSock = getLocalMultiplayerSocketId();
+
+  for(let i = 0; i < list.length; i++) {
+    const p = list[i];
+    const isMe =
+      !!(localPid && p.playerId && String(p.playerId) === localPid) ||
+      !!(localSock && p.odId && String(p.odId) === localSock);
+    const tr = document.createElement('tr');
+    if(isMe) tr.className = 'pvp-end-me';
+    const team = p.team === 'T' ? 'T' : 'CT';
+    const tdNick = document.createElement('td');
+    const nick = document.createElement('span');
+    nick.className = 'pvp-end-nick';
+    nick.textContent = String(p.nickname || '玩家');
+    tdNick.appendChild(nick);
+    const tdTeam = document.createElement('td');
+    const teamSpan = document.createElement('span');
+    teamSpan.className = team === 'CT' ? 'pvp-end-team-ct' : 'pvp-end-team-t';
+    teamSpan.textContent = team === 'CT' ? 'CT' : 'T';
+    tdTeam.appendChild(teamSpan);
+    const tdK = document.createElement('td');
+    tdK.className = 'col-num';
+    tdK.textContent = String(Number(p.kills) || 0);
+    const tdD = document.createElement('td');
+    tdD.className = 'col-num';
+    tdD.textContent = String(Number(p.deaths) || 0);
+    const tdKd = document.createElement('td');
+    tdKd.className = 'col-num';
+    tdKd.textContent = formatPvpMatchKd(p.kills, p.deaths);
+    const tdDmg = document.createElement('td');
+    tdDmg.className = 'col-num';
+    tdDmg.textContent = String(Math.round(Number(p.damage) || 0));
+    const tdSc = document.createElement('td');
+    tdSc.className = 'col-num';
+    tdSc.textContent = String(Math.round(Number(p.score) || 0));
+    const tdHs = document.createElement('td');
+    tdHs.className = 'col-num';
+    tdHs.textContent = String(Math.round(Number(p.headshots) || 0));
+    tr.appendChild(tdNick);
+    tr.appendChild(tdTeam);
+    tr.appendChild(tdK);
+    tr.appendChild(tdD);
+    tr.appendChild(tdKd);
+    tr.appendChild(tdDmg);
+    tr.appendChild(tdSc);
+    tr.appendChild(tdHs);
+    body.appendChild(tr);
+  }
+}
+
+function handle1v1MatchEndedMessage(data) {
+  if(!multiplayerData || !isMultiplayer1v1RoomMode()) return;
+  pvp1v1OvertimeActive = false;
+  pvp1v1OvertimeRevealEpochMs = 0;
+  pvp1v1MinimapRevealEpochMs = 0;
+  pvpMatchEnded = true;
+  pvpRoundEndWallClockMs = 0;
+  pvpMatchEndWallClockMs = 0;
+  respawnUntilMs = 0;
+  const ro = document.getElementById('respawn-overlay');
+  if(ro) ro.style.display = 'none';
+  const pm = document.getElementById('pause-menu');
+  if(pm) pm.style.display = 'none';
+  GAME.running = false;
+  GAME.paused = false;
+  cancelMeleeHeavyCharge();
+  document.exitPointerLock();
+  const wrap = document.getElementById('pvp-match-timer-wrap');
+  if(wrap) wrap.classList.add('pvp-timer-low');
+  const clock = document.getElementById('pvp-match-timer');
+  if(clock) {
+    clock.classList.remove('pvp-timer-ot-text');
+    clock.textContent = '0:00';
+  }
+  const ct = Number(data.ctScore) || 0;
+  const tt = Number(data.tScore) || 0;
+  const w = String(data.winner || '');
+  const reason = String(data.reason || '');
+  let outcome = 'draw';
+  if(w === 'CT' || w === 'T') {
+    outcome = GAME.playerTeam === w ? 'win' : 'lose';
+  }
+  const resultEl = document.getElementById('pvp-end-result');
+  const titleEl = document.getElementById('pvp-end-title');
+  if(titleEl) titleEl.textContent = '对局结束';
+  if(resultEl) {
+    resultEl.style.display = 'block';
+    if(outcome === 'win') {
+      resultEl.textContent = '胜利';
+      resultEl.className = 'pvp-end-result pvp-end-win';
+    } else if(outcome === 'lose') {
+      resultEl.textContent = '失败';
+      resultEl.className = 'pvp-end-result pvp-end-lose';
+    } else {
+      resultEl.textContent = '平局';
+      resultEl.className = 'pvp-end-result pvp-end-draw';
+    }
+  }
+  fillPvpEndMatchBoardFromPayload(data);
+
+  const sub = document.getElementById('pvp-end-sub');
+  if(sub) {
+    let reasonLine = '对局结束';
+    if(reason === 'opponent_left') {
+      reasonLine = outcome === 'win' ? '对手已离开赛场' : '对局已结束';
+    } else if(reason === 'score' && (w === 'CT' || w === 'T')) {
+      reasonLine = outcome === 'win' ? '率先达到制胜回合分' : '对方达到制胜回合分';
+    } else if(w === 'CT' || w === 'T') {
+      reasonLine = outcome === 'win' ? '你方获胜' : '你方落败';
+    }
+    sub.textContent = `${reasonLine} · 即将返回房间，也可点击下方按钮`;
+  }
+  const end = document.getElementById('pvp-match-end-overlay');
+  if(end) end.style.display = 'flex';
+  if(pvpAutoReturnToRoomTimer) {
+    clearTimeout(pvpAutoReturnToRoomTimer);
+    pvpAutoReturnToRoomTimer = null;
+  }
+  pvpAutoReturnToRoomTimer = setTimeout(() => {
+    pvpAutoReturnToRoomTimer = null;
+    returnToRoomAfterMatchEnd();
+  }, 5000);
 }
 
 function gameOver() {
@@ -7819,8 +8813,11 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   despawnExpiredWorldWeaponDrops(performance.now());
 
-  if(pvpMatchEndAtMs > 0 && isPvpMultiplayerRoom() && !pvpMatchEnded) {
-    updatePvpMatchTimerDisplay();
+  if(isPvpMultiplayerRoom() && !pvpMatchEnded) {
+    const needTick = isMultiplayer1v1RoomMode()
+      ? pvpRoundEndWallClockMs > 0 || pvp1v1OvertimeActive
+      : pvpMatchEndWallClockMs > 0;
+    if(needTick) updatePvpMatchTimerDisplay();
   }
 
   if(respawnUntilMs > 0) {
