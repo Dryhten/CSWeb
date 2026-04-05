@@ -1,7 +1,8 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
+
 const express = require('express');
 const http = require('http');
-const path = require('path');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const mongoose = require('mongoose');
@@ -66,11 +67,17 @@ mongoose.connect(MONGODB_URI)
     console.error('✗ MongoDB 连接失败:', err.message);
   });
 
-// Start server
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+// Start server：PORT 必须在项目根目录 .env 中配置；HOST 默认 0.0.0.0 可公网/局域网访问
+const PORT = parseInt(process.env.PORT, 10);
+if (!Number.isFinite(PORT) || PORT < 1 || PORT > 65535) {
+  console.error('✗ 请在项目根目录 .env 中设置 PORT 为 1–65535 的整数（可参考 .env.example）');
+  process.exit(1);
+}
+const HOST = process.env.HOST || '0.0.0.0';
+
+server.listen(PORT, HOST, () => {
   console.log(`========================================`);
-  console.log(`  烈火突击服务器 - 运行于端口 ${PORT}`);
+  console.log(`  烈火突击服务器 - 监听 ${HOST}:${PORT}（公网请放行该端口）`);
   console.log(`  API: http://localhost:${PORT}/api`);
   console.log(`  Socket.io: ws://localhost:${PORT}`);
   console.log(`========================================`);

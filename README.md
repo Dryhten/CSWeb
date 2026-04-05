@@ -95,13 +95,7 @@ npm install
 
 ### 配置
 
-1. 创建 `.env` 文件 (server/.env)
-```env
-PORT=3000
-MONGODB_URI=mongodb://localhost:27017/fire-assault
-JWT_SECRET=your-secret-key-change-in-production
-JWT_EXPIRE=7d
-```
+1. 在项目根目录复制 `.env.example` 为 `.env`，并按需修改（后端端口、MongoDB、JWT 等）
 
 ### 启动
 
