@@ -19,6 +19,10 @@
     "three-mesh-bvh": "^0.5.23",
     "zustand": "^4.4.7"
   },
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "4.60.1",
+    "@rollup/rollup-linux-x64-musl": "4.60.1"
+  },
   "devDependencies": {
     "@types/react": "^18.2.42",
     "@types/react-dom": "^18.2.17",
