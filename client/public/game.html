@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>烈火突击 - CROSSFIRE ASSAULT</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;500;700;900&family=Black+Ops+One&display=swap');
+/* === CSS RESET & BASE === */
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+--hud-orange:#FF6A00;--hud-red:#FF1744;--hud-green:#00E676;--hud-blue:#00B0FF;
+--hud-yellow:#FFD600;--bg-dark:#0a0a0f;--bg-panel:rgba(10,10,15,0.85);
+--border-glow:rgba(255,106,0,0.4);--text-primary:#e0e0e0;--text-bright:#ffffff;
+}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Rajdhani',sans-serif;color:var(--text-primary)}
+.hidden{display:none !important}
+body.in-game{cursor:none}
+canvas{display:block}
+/* === CUSTOM CROSSHAIR (rendered in-game) === */
+#crosshair{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:100}
+/* === DAMAGE OVERLAY === */
+#damage-overlay{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:90;
+  background:radial-gradient(ellipse at center,transparent 50%,rgba(255,0,0,0.0) 100%);opacity:0;transition:opacity 0.1s}
+/* === KILL FEED === */
+#kill-feed{position:fixed;top:80px;right:20px;z-index:100;pointer-events:none;display:flex;flex-direction:column;gap:4px}
+.kill-msg{background:rgba(0,0,0,0.7);border-left:3px solid var(--hud-orange);padding:6px 14px;font-size:13px;
+  font-family:'Rajdhani',sans-serif;font-weight:600;color:#fff;animation:killSlide 0.3s ease-out,killFade 0.5s 7.5s forwards;white-space:nowrap}
+@keyframes killSlide{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes killFade{to{opacity:0;transform:translateY(-10px)}}
+/* === FLOATING DAMAGE NUMBERS === */
+.dmg-number{position:fixed;pointer-events:none;z-index:95;font-family:'Orbitron',sans-serif;font-weight:700;
+  font-size:18px;color:var(--hud-yellow);text-shadow:0 0 6px rgba(255,214,0,0.6);animation:dmgFloat 0.8s forwards}
+.dmg-number.crit{font-size:26px;color:var(--hud-blue);text-shadow:0 0 14px rgba(0,176,255,0.85)}
+.dmg-number.crit::before{content:'🎯 '}
+@keyframes dmgFloat{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(-60px) scale(0.6)}}
+/* === HUD CONTAINER === */
+#hud{position:fixed;bottom:0;left:0;width:100%;pointer-events:none;z-index:100}
+/* === HEALTH BAR === */
+#health-bar-container{position:fixed;bottom:20px;left:20px;z-index:100}
+#health-icon{font-size:14px;color:var(--hud-red);margin-bottom:4px;font-family:'Orbitron';font-weight:700;letter-spacing:2px}
+#health-bar-bg{width:220px;height:8px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);position:relative;overflow:hidden}
+#health-bar-fill{height:100%;width:100%;background:linear-gradient(90deg,var(--hud-red),#ff4444);transition:width 0.3s;position:relative}
+#health-bar-fill::after{content:'';position:absolute;top:0;left:0;right:0;height:50%;background:rgba(255,255,255,0.2)}
+#health-text{font-family:'Orbitron';font-size:28px;font-weight:900;color:var(--text-bright);margin-top:2px;letter-spacing:1px}
+#health-text span{font-size:14px;color:rgba(255,255,255,0.4);margin-left:4px}
+/* === AMMO DISPLAY === */
+#ammo-container{position:fixed;bottom:20px;right:20px;z-index:100;text-align:right}
+#weapon-name{font-family:'Orbitron';font-size:11px;font-weight:500;color:var(--hud-orange);letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}
+#ammo-display{font-family:'Orbitron';font-weight:900;color:var(--text-bright)}
+#ammo-current{font-size:42px;letter-spacing:2px}
+#ammo-sep{font-size:20px;color:rgba(255,255,255,0.3);margin:0 4px}
+#ammo-reserve{font-size:20px;color:rgba(255,255,255,0.5)}
+#fire-mode{font-size:10px;color:rgba(255,255,255,0.4);font-family:'Rajdhani';letter-spacing:2px;margin-top:2px}
+/* === WEAPON SLOTS === */
+#weapon-slots{position:fixed;bottom:90px;right:20px;z-index:100;display:flex;gap:6px}
+.weapon-slot{width:70px;height:32px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);
+  display:flex;align-items:center;justify-content:center;font-family:'Rajdhani';font-size:11px;font-weight:600;color:rgba(255,255,255,0.4);position:relative}
+.weapon-slot.active{border-color:var(--hud-orange);color:var(--hud-orange);background:rgba(255,106,0,0.1)}
+.weapon-slot .slot-num{position:absolute;top:2px;left:5px;font-size:9px;color:rgba(255,255,255,0.3)}
+.weapon-slot.active .slot-num{color:var(--hud-orange)}
+/* === PVP MATCH TIMER（CS:GO 风格顶栏倒计时） === */
+#pvp-match-timer-wrap{position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:100;
+  display:none;flex-direction:column;align-items:center;gap:2px;pointer-events:none}
+#pvp-match-timer-wrap.visible{display:flex}
+.pvp-timer-bar{
+  min-width:148px;padding:5px 18px 7px;
+  background:linear-gradient(180deg,rgba(16,16,22,0.94) 0%,rgba(8,8,12,0.9) 100%);
+  border:1px solid rgba(255,255,255,0.1);
+  border-top:2px solid var(--hud-orange);
+  box-shadow:0 6px 24px rgba(0,0,0,0.55),inset 0 1px 0 rgba(255,255,255,0.05);
+  text-align:center}
+#pvp-match-timer-label{font-family:'Rajdhani',sans-serif;font-size:9px;letter-spacing:5px;color:rgba(255,255,255,0.42);
+  text-transform:uppercase;margin-bottom:1px}
+#pvp-match-timer{font-family:'Orbitron',monospace;font-size:26px;font-weight:800;color:var(--text-bright);
+  letter-spacing:4px;line-height:1.15;
+  text-shadow:0 0 16px rgba(255,106,0,0.22),0 1px 0 rgba(0,0,0,0.8)}
+#pvp-match-timer-wrap.pvp-timer-low .pvp-timer-bar{border-top-color:var(--hud-red);
+  box-shadow:0 6px 24px rgba(0,0,0,0.55),0 0 20px rgba(255,23,68,0.12),inset 0 1px 0 rgba(255,255,255,0.05)}
+#pvp-match-timer-wrap.pvp-timer-low #pvp-match-timer{color:#ff8a80;text-shadow:0 0 18px rgba(255,23,68,0.35)}
+body.pvp-match-active #score-container{top:58px}
+body.pvp-match-active #kill-feed{top:118px}
+#pvp-match-end-overlay{position:fixed;inset:0;z-index:2000;display:none;flex-direction:column;align-items:center;
+  justify-content:center;background:rgba(0,0,0,0.82);backdrop-filter:blur(6px);pointer-events:auto}
+#pvp-match-end-overlay .pvp-end-title{font-family:'Orbitron',sans-serif;font-size:22px;color:var(--text-bright);letter-spacing:6px;margin-bottom:12px}
+#pvp-match-end-overlay .pvp-end-sub{font-family:'Rajdhani',sans-serif;font-size:14px;color:rgba(255,255,255,0.55);margin-bottom:28px}
+#pvp-match-end-overlay .menu-btn{margin-top:4px}
+/* === MINIMAP === */
+#minimap-container{position:fixed;top:15px;left:15px;z-index:100}
+#minimap-border{width:160px;height:160px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.6);position:relative;overflow:hidden}
+#minimap-canvas{width:100%;height:100%}
+#minimap-label{font-family:'Orbitron';font-size:9px;color:rgba(255,255,255,0.3);letter-spacing:3px;margin-top:4px}
+/* === SCORE / KILLS === */
+#score-container{position:fixed;top:15px;left:50%;transform:translateX(-50%);z-index:100;text-align:center;transition:top 0.2s ease}
+#score-kills{font-family:'Orbitron';font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:3px}
+#score-value{font-family:'Orbitron';font-size:32px;font-weight:900;color:var(--text-bright);letter-spacing:2px}
+/* === KILL COUNTER (CF style) === */
+#kill-counter-container{position:fixed;bottom:120px;left:20px;z-index:100;pointer-events:none}
+#kill-counter-label{font-family:'Orbitron';font-size:10px;color:rgba(255,255,255,0.4);letter-spacing:2px;margin-bottom:4px}
+#kill-counter{display:flex;gap:3px;flex-wrap:wrap;max-width:120px}
+.kill-icon{width:16px;height:16px;border:1px solid rgba(255,255,255,0.2);background:rgba(0,0,0,0.3);border-radius:2px;transition:all 0.15s}
+.kill-icon.kill{background:var(--hud-orange);border-color:var(--hud-orange)}
+.kill-icon.headshot{background:var(--hud-yellow);border-color:var(--hud-yellow)}
+.kill-icon.headshot::after{content:'★';position:absolute;font-size:8px;color:#000;top:50%;left:50%;transform:translate(-50%,-50%)}
+.kill-icon:not(:empty){box-shadow:0 0 6px rgba(255,106,0,0.5)}
+#kill-stats{font-family:'Rajdhani';font-size:11px;color:rgba(255,255,255,0.5);margin-top:6px;display:flex;gap:10px}
+#kill-stats span{color:var(--hud-orange);font-weight:600}
+/* 换弹进度改在 #crosshair 内环形显示，不再使用屏幕中部横条 */
+/* === HIT MARKER === */
+#hitmarker{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:99;opacity:0}
+/* === BUY MENU === */
+#buy-menu{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1000;
+  background:rgba(10,10,15,0.95);border:1px solid var(--hud-orange);border-radius:4px;
+  padding:20px;min-width:320px;max-width:400px}
+#buy-menu-title{font-family:'Orbitron';font-size:18px;color:var(--hud-orange);letter-spacing:3px;
+  text-align:center;margin-bottom:20px}
+#buy-menu-content{display:flex;flex-direction:column;gap:15px}
+.buy-category{border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:10px}
+.buy-category-title{font-family:'Rajdhani';font-size:12px;color:rgba(255,255,255,0.5);letter-spacing:2px;margin-bottom:8px}
+.buy-item{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:3px;
+  margin:4px 0;cursor:pointer;transition:all 0.2s}
+.buy-item:hover{border-color:var(--hud-orange);background:rgba(255,106,0,0.1)}
+.buy-item-name{font-family:'Rajdhani';font-size:14px;color:#fff}
+.buy-item-price{font-family:'Orbitron';font-size:12px;color:var(--hud-green)}
+#buy-menu-footer{font-family:'Rajdhani';font-size:11px;color:rgba(255,255,255,0.4);text-align:center;margin-top:15px}
+#buy-menu-footer span{color:var(--hud-orange);font-weight:600}
+/* === MAIN MENU === */
+#main-menu{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1000;
+  background:linear-gradient(135deg,#0a0a0f 0%,#1a1020 50%,#0a0a0f 100%);display:flex;flex-direction:column;align-items:center;justify-content:center}
+#menu-bg-effects{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden}
+.menu-line{position:absolute;height:1px;background:linear-gradient(90deg,transparent,var(--hud-orange),transparent);opacity:0.1;animation:menuLineScan 8s linear infinite}
+@keyframes menuLineScan{0%{transform:translateY(-100vh)}100%{transform:translateY(100vh)}}
+#menu-content{position:relative;z-index:10;text-align:center}
+#game-logo{font-family:'Black Ops One',sans-serif;font-size:64px;color:var(--text-bright);letter-spacing:6px;margin-bottom:4px;
+  text-shadow:0 0 40px rgba(255,106,0,0.3),0 4px 8px rgba(0,0,0,0.5)}
+#game-subtitle{font-family:'Orbitron';font-size:13px;color:var(--hud-orange);letter-spacing:8px;margin-bottom:60px;font-weight:400}
+.menu-btn{display:block;width:280px;margin:0 auto 14px;padding:14px 0;background:transparent;border:1px solid rgba(255,255,255,0.15);
+  color:var(--text-primary);font-family:'Rajdhani';font-size:16px;font-weight:600;letter-spacing:4px;text-transform:uppercase;
+  cursor:pointer;position:relative;overflow:hidden;transition:all 0.3s}
+.menu-btn:hover{border-color:var(--hud-orange);color:var(--hud-orange);background:rgba(255,106,0,0.05)}
+.menu-btn:hover::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--hud-orange)}
+.menu-btn.primary{border-color:var(--hud-orange);color:var(--hud-orange);background:rgba(255,106,0,0.08)}
+#menu-footer{position:absolute;bottom:30px;font-family:'Rajdhani';font-size:12px;color:rgba(255,255,255,0.2);letter-spacing:3px}
+#menu-corner-tl,#menu-corner-tr,#menu-corner-bl,#menu-corner-br{position:absolute;width:40px;height:40px;border-color:rgba(255,106,0,0.2);border-style:solid;border-width:0}
+#menu-corner-tl{top:30px;left:30px;border-top-width:1px;border-left-width:1px}
+#menu-corner-tr{top:30px;right:30px;border-top-width:1px;border-right-width:1px}
+#menu-corner-bl{bottom:30px;left:30px;border-bottom-width:1px;border-left-width:1px}
+#menu-corner-br{bottom:30px;right:30px;border-bottom-width:1px;border-right-width:1px}
+/* === PAUSE MENU === */
+#pause-menu{position:fixed;top:0;left:0;width:100%;height:100%;z-index:900;background:rgba(0,0,0,0.8);
+  display:none;flex-direction:column;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#pause-title{font-family:'Orbitron';font-size:24px;color:var(--text-bright);letter-spacing:6px;margin-bottom:30px}
+#pause-controls{font-family:'Rajdhani';font-size:14px;color:rgba(255,255,255,0.7);text-align:center;margin-bottom:40px}
+#pause-controls h3{font-family:'Orbitron';font-size:14px;color:var(--hud-orange);letter-spacing:3px;margin-bottom:20px}
+#pause-controls p{margin:8px 0}
+#pause-controls span{color:var(--hud-orange);font-weight:600;margin-right:8px}
+/* === GAME OVER（单机 / 非 PVP 联机） === */
+#gameover-screen{position:fixed;top:0;left:0;width:100%;height:100%;z-index:950;background:rgba(0,0,0,0.85);
+  display:none;flex-direction:column;align-items:center;justify-content:center;backdrop-filter:blur(6px)}
+#gameover-title{font-family:'Black Ops One';font-size:48px;color:var(--hud-red);letter-spacing:4px;margin-bottom:10px;
+  text-shadow:0 0 30px rgba(255,23,68,0.4)}
+#gameover-stats{text-align:center;margin:20px 0 40px}
+#gameover-stats div{font-family:'Rajdhani';font-size:18px;color:rgba(255,255,255,0.6);margin:8px 0}
+#gameover-stats span{color:var(--hud-orange);font-weight:700;font-size:22px}
+/* === RESPAWN COUNTDOWN（PVP 联机：阵亡后 5 秒复活） === */
+#respawn-overlay{position:fixed;top:0;left:0;width:100%;height:100%;z-index:960;background:rgba(0,0,0,0.72);
+  display:none;flex-direction:column;align-items:center;justify-content:center;backdrop-filter:blur(5px)}
+#respawn-countdown{font-family:'Orbitron',sans-serif;font-size:56px;color:var(--hud-orange);letter-spacing:6px;
+  text-shadow:0 0 24px rgba(255,106,0,0.45)}
+#respawn-hint{font-family:'Rajdhani',sans-serif;font-size:16px;color:rgba(255,255,255,0.72);margin-top:14px;letter-spacing:2px}
+/* === WEAPON VIEW MODEL (handled by Three.js viewmodel scene) === */
+/* === VIGNETTE OVERLAY === */
+#vignette{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;
+  background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,0.5) 100%)}
+/* AWP 开镜：全屏遮罩，仅中心圆形通光（类 CS:GO），外围纯黑 */
+#scope-overlay{position:fixed;inset:0;pointer-events:none;z-index:6;opacity:0;transition:opacity 0.14s ease-out;width:100%;height:100%}
+#scope-overlay .scope-vignette-full{position:absolute;inset:0;width:100%;height:100%;
+  background:radial-gradient(circle at 50% 50%,rgba(0,0,0,0) 0,rgba(0,0,0,0) min(36vmin,36vh),rgba(0,0,0,0.9) min(37vmin,37vh),#000 min(38vmin,38vh),#000 100%)}
+#scope-overlay .scope-reticle-fs{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:1}
+/* CS:GO 式：外侧十字实线；仅中心约 1cm 区域在走动（含静步）时虚化 */
+#scope-crosshair-center{transition:filter 0.22s ease,opacity 0.18s ease}
+#scope-crosshair-center.scope-reticle-moving{filter:blur(1.22px);opacity:0.86}
+/* === FPS COUNTER === */
+#fps-counter{position:fixed;top:15px;right:15px;z-index:100;font-family:'Orbitron';font-size:10px;color:rgba(255,255,255,0.3);letter-spacing:1px}
+/* === INSTRUCTIONS OVERLAY === */
+#instructions{position:fixed;bottom:100px;left:50%;transform:translateX(-50%);z-index:100;
+  font-family:'Rajdhani';font-size:13px;color:rgba(255,255,255,0.25);text-align:center;letter-spacing:1px;display:none}
+</style>
+  <script type="module" crossorigin src="/assets/game-DRo9Txk9.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-B5Qt9EMX.js">
+</head>
+<body>
+
+<!-- MAIN MENU -->
+<div id="main-menu">
+  <div id="menu-bg-effects">
+    <div class="menu-line" style="left:20%;animation-delay:0s"></div>
+    <div class="menu-line" style="left:50%;animation-delay:2s"></div>
+    <div class="menu-line" style="left:80%;animation-delay:4s"></div>
+  </div>
+  <div id="menu-corner-tl"></div><div id="menu-corner-tr"></div>
+  <div id="menu-corner-bl"></div><div id="menu-corner-br"></div>
+  <div id="menu-content">
+    <div id="game-logo">烈火突击</div>
+    <div id="game-subtitle">CROSSFIRE ASSAULT</div>
+    <button class="menu-btn primary" id="btn-play" onclick="showLoginOrLobby()">开始战斗</button>
+    <button class="menu-btn" onclick="showControls()">操作说明</button>
+  </div>
+  <div id="menu-footer">TACTICAL COMBAT SIMULATOR v2.1</div>
+</div>
+
+<!-- LOGIN / REGISTER SCREEN -->
+<div id="auth-screen" class="screen hidden">
+  <div class="auth-container">
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="showAuthTab('login')">登录</button>
+      <button class="auth-tab" onclick="showAuthTab('register')">注册</button>
+    </div>
+    <div id="login-form" class="auth-form">
+      <form autocomplete="on" onsubmit="event.preventDefault(); return false;">
+        <input type="text" id="login-username" placeholder="用户名">
+        <input type="password" id="login-password" placeholder="密码">
+        <button type="button" class="auth-submit" onclick="doLogin()">登录</button>
+      </form>
+      <div class="auth-error" id="login-error"></div>
+    </div>
+    <div id="register-form" class="auth-form hidden">
+      <form autocomplete="on" onsubmit="event.preventDefault(); return false;">
+        <input type="text" id="reg-username" placeholder="用户名 (3-20字符)">
+        <input type="password" id="reg-password" placeholder="密码 (至少6位)">
+        <input type="text" id="reg-nickname" placeholder="昵称">
+        <button type="button" class="auth-submit" onclick="doRegister()">注册</button>
+      </form>
+      <div class="auth-error" id="reg-error"></div>
+    </div>
+    <button class="auth-back" onclick="showMainMenu()">返回</button>
+  </div>
+</div>
+
+<!-- LOBBY SCREEN -->
+<div id="lobby-screen" class="screen hidden">
+  <div class="lobby-header">
+    <div class="lobby-user">
+      <span class="user-name" id="lobby-username">玩家</span>
+      <span class="user-level">Lv.<span id="lobby-level">1</span></span>
+      <span class="user-coins">💰 <span id="lobby-coins">1000</span></span>
+    </div>
+    <button class="lobby-btn" onclick="showCreateRoom()">创建房间</button>
+    <button class="lobby-btn" onclick="showJoinRoom()">加入房间</button>
+    <button class="lobby-btn" onclick="logout()">退出登录</button>
+  </div>
+  <div class="lobby-main">
+    <div class="lobby-sidebar">
+      <div class="server-status">
+        <h3>服务器状态</h3>
+        <div class="status-item">在线玩家: <span id="online-players">0</span></div>
+        <div class="status-item">房间数: <span id="room-count">0</span></div>
+      </div>
+      <div class="quick-join">
+        <button class="quick-btn" onclick="quickJoin()">快速加入</button>
+      </div>
+    </div>
+    <div class="lobby-content">
+      <div class="room-list-header">
+        <h3>房间列表</h3>
+        <input type="text" id="room-search" placeholder="搜索房间号..." onkeyup="searchRoom()">
+      </div>
+      <div class="room-list" id="room-list">
+        <div class="room-empty">暂无房间，点击创建房间开始游戏</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CREATE ROOM MODAL -->
+<div id="create-room-modal" class="modal hidden">
+  <div class="modal-content">
+    <h2>创建房间</h2>
+    <form autocomplete="on" onsubmit="event.preventDefault(); return false;">
+    <div class="form-group">
+      <label>房间名称</label>
+      <input type="text" id="room-name" placeholder="我的房间" maxlength="30">
+    </div>
+    <div class="form-group">
+      <label>密码 (留空为公开)</label>
+      <input type="password" id="room-password" placeholder="可选">
+    </div>
+    <div class="form-group">
+      <label>游戏模式</label>
+      <select id="room-mode">
+        <option value="pvp">PVP 对战</option>
+        <option value="pve">PVE 生存</option>
+        <option value="deathmatch">死斗模式</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>地图</label>
+      <select id="room-map">
+        <option value="desert">沙漠2</option>
+        <option value="warehouse">仓库突袭</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>最大人数</label>
+      <select id="room-max-players">
+        <option value="4">4人</option>
+        <option value="6">6人</option>
+        <option value="8">8人</option>
+        <option value="10" selected>10人</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="modal-btn primary" onclick="createRoom()">创建</button>
+      <button type="button" class="modal-btn" onclick="closeModal('create-room-modal')">取消</button>
+    </div>
+    </form>
+  </div>
+</div>
+
+<!-- JOIN ROOM MODAL -->
+<div id="join-room-modal" class="modal hidden">
+  <div class="modal-content">
+    <h2>加入房间</h2>
+    <form autocomplete="on" onsubmit="event.preventDefault(); return false;">
+    <div class="form-group">
+      <label>房间号</label>
+      <input type="text" id="join-room-id" placeholder="输入房间号" maxlength="6" style="text-transform:uppercase">
+    </div>
+    <div class="form-group">
+      <label>密码 (公开房间留空)</label>
+      <input type="password" id="join-room-password" placeholder="可选">
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="modal-btn primary" onclick="joinRoom()">加入</button>
+      <button type="button" class="modal-btn" onclick="closeModal('join-room-modal')">取消</button>
+    </div>
+    </form>
+  </div>
+</div>
+
+<!-- ROOM SCREEN -->
+<div id="room-screen" class="screen hidden">
+  <div class="room-header">
+    <div class="room-info">
+      <h2 id="room-title">房间</h2>
+      <span class="room-id">房间号: <span id="current-room-id">------</span></span>
+    </div>
+    <button class="room-btn" onclick="leaveRoom()">退出房间</button>
+  </div>
+  <div class="room-main">
+    <div class="room-teams">
+      <div class="team-panel ct">
+        <h3>CT (反恐精英)</h3>
+        <div class="team-players" id="ct-players"></div>
+      </div>
+      <div class="team-panel t">
+        <h3>T (恐怖分子)</h3>
+        <div class="team-players" id="t-players"></div>
+      </div>
+    </div>
+    <div class="room-sidebar">
+      <div class="room-settings-panel">
+        <h3>房间设置</h3>
+        <div class="setting-item">模式: <span id="room-mode-display">PVP</span></div>
+        <div class="setting-item">地图: <span id="room-map-display">沙漠2</span></div>
+        <div class="setting-item">人数: <span id="room-players-display">0/10</span></div>
+      </div>
+      <div class="room-chat">
+        <h3>房间消息</h3>
+        <div class="chat-messages" id="chat-messages"></div>
+      </div>
+      <div class="room-actions">
+        <button class="ready-btn" id="btn-ready" onclick="toggleReady()">准备</button>
+        <button class="start-btn hidden" id="btn-start" onclick="startGame()">开始游戏</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- PAUSE MENU -->
+<div id="pause-menu">
+  <div id="pause-title">游戏信息</div>
+  <div id="pause-controls">
+    <h3>操作说明</h3>
+    <p><span>WASD</span> 移动</p>
+    <p><span>鼠标</span> 瞄准射击</p>
+    <p><span>AWP右键</span> 一倍→二倍→关镜</p>
+    <p><span>R</span> 换弹</p>
+    <p><span>空格</span> 跳跃</p>
+    <p><span>1/2/3</span> 切换武器</p>
+    <p><span>Shift</span> 静步</p>
+    <p><span>Ctrl</span> 下蹲</p>
+  </div>
+  <button class="menu-btn" onclick="quitToMenu()">退出对局</button>
+</div>
+
+<!-- GAME OVER（单机等；PVP 联机使用下方复活倒计时） -->
+<div id="gameover-screen">
+  <div id="gameover-title">阵亡</div>
+  <div id="gameover-stats">
+    <div>击杀数 <span id="final-kills">0</span></div>
+    <div>总得分 <span id="final-score">0</span></div>
+  </div>
+  <button class="menu-btn primary" onclick="restartGame()">重新开始</button>
+  <button class="menu-btn" onclick="quitToMenu()">返回主菜单</button>
+</div>
+
+<!-- PVP 复活倒计时 -->
+<div id="respawn-overlay">
+  <div id="respawn-countdown">5</div>
+  <div id="respawn-hint">秒后复活</div>
+</div>
+
+<!-- HUD ELEMENTS -->
+<div id="crosshair"></div>
+<div id="vignette"></div>
+<div id="scope-overlay" aria-hidden="true">
+  <div class="scope-vignette-full"></div>
+  <svg class="scope-reticle-fs" viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="50" cy="50" r="36" fill="none" stroke="rgba(0,0,0,0.45)" stroke-width="0.24" vector-effect="non-scaling-stroke"/>
+    <g id="scope-crosshair-outer" stroke="#0a0a0a" stroke-width="0.10" vector-effect="non-scaling-stroke">
+      <line x1="50" y1="14" x2="50" y2="46.2"/>
+      <line x1="50" y1="53.8" x2="50" y2="86"/>
+      <line x1="14" y1="50" x2="46.2" y2="50"/>
+      <line x1="53.8" y1="50" x2="86" y2="50"/>
+    </g>
+    <g id="scope-crosshair-center" stroke="#0a0a0a" stroke-width="0.10" vector-effect="non-scaling-stroke">
+      <line x1="50" y1="46.2" x2="50" y2="53.8"/>
+      <line x1="46.2" y1="50" x2="53.8" y2="50"/>
+    </g>
+  </svg>
+</div>
+<div id="damage-overlay"></div>
+<div id="hitmarker"></div>
+<div id="kill-feed"></div>
+
+<!-- PVP 对局时间（仅联机 PVP 显示） -->
+<div id="pvp-match-timer-wrap" aria-hidden="true">
+  <div class="pvp-timer-bar">
+    <div id="pvp-match-timer-label">对局时间</div>
+    <div id="pvp-match-timer">5:00</div>
+  </div>
+</div>
+
+<div id="pvp-match-end-overlay">
+  <div class="pvp-end-title">对局结束</div>
+  <div class="pvp-end-sub">时间已到 · 将返回房间，可再次开始游戏</div>
+  <button type="button" class="menu-btn primary" onclick="returnToRoomAfterMatchEnd()">立即返回房间</button>
+</div>
+
+<div id="health-bar-container">
+  <div id="health-icon">HP</div>
+  <div id="health-bar-bg"><div id="health-bar-fill"></div></div>
+  <div id="health-text">100<span>/100</span></div>
+</div>
+
+<div id="ammo-container">
+  <div id="weapon-name">AK-47</div>
+  <div id="weapon-mobility" style="font-size:9px;color:rgba(255,255,255,0.35);letter-spacing:1px;margin-top:2px;font-family:'Rajdhani',sans-serif"></div>
+  <div id="weapon-csgo-bar" style="font-size:8px;color:rgba(255,255,255,0.28);margin-top:3px;max-width:260px;line-height:1.35;font-family:'Rajdhani',sans-serif"></div>
+  <div id="ammo-display">
+    <span id="ammo-current">30</span><span id="ammo-sep">/</span><span id="ammo-reserve">120</span>
+  </div>
+  <div id="fire-mode">AUTO</div>
+</div>
+
+<div id="weapon-slots">
+  <div class="weapon-slot" id="slot-1"></div>
+  <div class="weapon-slot" id="slot-2"></div>
+  <div class="weapon-slot" id="slot-3"></div>
+</div>
+
+<div id="buy-menu" class="hidden">
+  <div id="buy-menu-title">购买武器</div>
+  <div id="buy-menu-content">
+    <div class="buy-category">
+      <div class="buy-category-title">突击步枪</div>
+      <div class="buy-item" data-weapon="ak" data-price="2700">
+        <span class="buy-item-name">AK-47</span>
+        <span class="buy-item-price">$2700</span>
+      </div>
+    </div>
+    <div class="buy-category">
+      <div class="buy-category-title">狙击步枪</div>
+      <div class="buy-item" data-weapon="awp" data-price="4750">
+        <span class="buy-item-name">AWP</span>
+        <span class="buy-item-price">$4750</span>
+      </div>
+    </div>
+    <div class="buy-category">
+      <div class="buy-category-title">手枪</div>
+      <div class="buy-item" data-weapon="usp" data-price="200">
+        <span class="buy-item-name">USP-S</span>
+        <span class="buy-item-price">$200</span>
+      </div>
+    </div>
+    <!-- 暂时隐藏投掷物：移除下方 div 的 hidden 属性即可恢复 -->
+    <div class="buy-category" id="buy-category-throwables" hidden>
+      <div class="buy-category-title">投掷物</div>
+      <div class="buy-item" data-weapon="he" data-price="300">
+        <span class="buy-item-name">手雷</span>
+        <span class="buy-item-price">$300</span>
+      </div>
+      <div class="buy-item" data-weapon="flash" data-price="200">
+        <span class="buy-item-name">闪光弹</span>
+        <span class="buy-item-price">$200</span>
+      </div>
+      <div class="buy-item" data-weapon="smoke" data-price="200">
+        <span class="buy-item-name">烟雾弹</span>
+        <span class="buy-item-price">$200</span>
+      </div>
+    </div>
+  </div>
+  <div id="buy-menu-footer">按 <span>B</span> 关闭 | 点击购买</div>
+</div>
+
+<div id="minimap-container">
+  <div id="minimap-border"><canvas id="minimap-canvas" width="160" height="160"></canvas></div>
+  <div id="minimap-label">沙漠2</div>
+</div>
+
+<div id="dev-spawn-hud" style="display:none;position:fixed;top:10px;left:10px;z-index:101;pointer-events:none;font-family:'Orbitron','Rajdhani',sans-serif;font-size:11px;color:rgba(220,235,255,0.95);text-shadow:0 1px 4px rgba(0,0,0,0.95);background:rgba(8,10,18,0.72);padding:10px 12px;border-radius:6px;border:1px solid rgba(0,176,255,0.28);line-height:1.5;max-width:min(96vw,400px)">
+  <div style="font-size:9px;letter-spacing:2px;color:rgba(0,200,255,0.85);margin-bottom:6px">世界坐标（记录出生点）</div>
+  <div id="dev-coords-line1">相机 —</div>
+  <div id="dev-coords-line2">脚底 —</div>
+  <div id="dev-jump-hint" style="opacity:0.82;margin-top:8px;font-size:10px;color:rgba(255,255,255,0.68)"></div>
+</div>
+
+<div id="score-container">
+  <div id="score-kills">KILLS</div>
+  <div id="score-value">0</div>
+</div>
+
+<div id="kill-counter-container">
+  <div id="kill-counter-label">连杀</div>
+  <div id="kill-counter">
+    <div class="kill-icon" data-index="0"></div>
+    <div class="kill-icon" data-index="1"></div>
+    <div class="kill-icon" data-index="2"></div>
+    <div class="kill-icon" data-index="3"></div>
+    <div class="kill-icon" data-index="4"></div>
+    <div class="kill-icon" data-index="5"></div>
+    <div class="kill-icon" data-index="6"></div>
+    <div class="kill-icon" data-index="7"></div>
+    <div class="kill-icon" data-index="8"></div>
+    <div class="kill-icon" data-index="9"></div>
+  </div>
+  <div id="kill-stats">
+    <span id="headshot-count">爆头: 0</span>
+    <span id="total-kills">击杀: 0</span>
+  </div>
+</div>
+
+<div id="fps-counter">-- FPS</div>
+<div id="instructions">WASD移动 | 鼠标射击 | AWP右键：一倍→二倍→关镜 | R换弹 | 空格跳 | J无限跳探图 | 1/2/3切枪 | Shift静步 | Ctrl下蹲 | ESC暂停</div>
+
+</body>
+</html>

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>游戏配置管理 - 烈火突击</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
+      padding: 20px 40px;
+      border-bottom: 2px solid #FF6A00;
+    }
+    .header h1 { color: #FF6A00; font-size: 24px; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .nav { display: flex; gap: 10px; margin-bottom: 20px; }
+    .nav-btn {
+      padding: 10px 20px;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      color: #888;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: all 0.3s;
+    }
+    .nav-btn:hover, .nav-btn.active {
+      background: #FF6A00;
+      color: #fff;
+      border-color: #FF6A00;
+    }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .card {
+      background: #12121a;
+      border: 1px solid #2a2a3a;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .card h2 { color: #FF6A00; margin-bottom: 15px; font-size: 18px; }
+    .weapon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; }
+    .weapon-item {
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 15px;
+    }
+    .weapon-item:hover { border-color: #FF6A00; }
+    .weapon-item h3 { color: #fff; margin-bottom: 10px; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; color: #888; margin-bottom: 5px; font-size: 12px; }
+    .form-group input, .form-group select {
+      width: 100%;
+      padding: 8px;
+      background: #0a0a0f;
+      border: 1px solid #333;
+      color: #fff;
+      border-radius: 4px;
+    }
+    .form-group input:focus { border-color: #FF6A00; outline: none; }
+    .btn {
+      padding: 8px 16px;
+      background: #FF6A00;
+      border: none;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn:hover { background: #ff8533; }
+    .btn-secondary { background: #333; }
+    .btn-secondary:hover { background: #444; }
+    .section-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .table { width: 100%; border-collapse: collapse; }
+    .table th, .table td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
+    .table th { background: #1a1a2e; color: #FF6A00; }
+    .table td input { width: 80px; padding: 5px; background: #0a0a0f; border: 1px solid #333; color: #fff; }
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.8);
+      z-index: 1000;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal.active { display: flex; }
+    .modal-content {
+      background: #12121a;
+      border: 1px solid #FF6A00;
+      border-radius: 8px;
+      padding: 30px;
+      max-width: 600px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal-header { display: flex; justify-content: space-between; margin-bottom: 20px; }
+    .modal-header h2 { color: #FF6A00; }
+    .close-btn { background: none; border: none; color: #888; font-size: 24px; cursor: pointer; }
+    .close-btn:hover { color: #FF6A00; }
+    .param-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .tabs { display: flex; gap: 5px; margin-bottom: 15px; }
+    .tab {
+      padding: 8px 16px;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      color: #888;
+      cursor: pointer;
+    }
+    .tab.active { background: #FF6A00; color: #fff; border-color: #FF6A00; }
+    .status-ok { color: #00E676; }
+    .status-err { color: #FF1744; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🔥 烈火突击 - 游戏配置管理</h1>
+  </div>
+  
+  <div class="container">
+    <div class="nav">
+      <button class="nav-btn active" onclick="showPanel('weapons')">武器配置</button>
+      <button class="nav-btn" onclick="showPanel('character')">角色参数</button>
+      <button class="nav-btn" onclick="showPanel('maps')">地图配置</button>
+      <button class="nav-btn" onclick="showPanel('modes')">游戏模式</button>
+      <button class="nav-btn" onclick="loadConfig()">🔄 刷新配置</button>
+    </div>
+
+    <!-- 武器配置 -->
+    <div id="weapons" class="panel active">
+      <div class="card">
+        <div class="section-title">
+          <h2>武器列表</h2>
+          <button class="btn" onclick="openWeaponModal()">+ 添加武器</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>武器名称</th>
+              <th>类型</th>
+              <th>伤害</th>
+              <th>射速(ms)</th>
+              <th>弹匣</th>
+              <th>价格</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="weaponTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 角色参数 -->
+    <div id="character" class="panel">
+      <div class="card">
+        <h2>角色移动与物理参数</h2>
+        <div class="param-grid">
+          <div class="form-group">
+            <label>持刀移速 (moveKnifeSpeed)</label>
+            <input type="number" step="0.1" id="moveKnifeSpeed">
+          </div>
+          <div class="form-group">
+            <label>冲刺倍率 (sprintMultiplier)</label>
+            <input type="number" step="0.1" id="sprintMultiplier">
+          </div>
+          <div class="form-group">
+            <label>跳跃力度 (jumpForce)</label>
+            <input type="number" step="0.1" id="jumpForce">
+          </div>
+          <div class="form-group">
+            <label>重力 (gravity)</label>
+            <input type="number" step="0.1" id="gravity">
+          </div>
+          <div class="form-group">
+            <label>身高 (playerHeight)</label>
+            <input type="number" step="0.1" id="playerHeight">
+          </div>
+          <div class="form-group">
+            <label>碰撞半径 (playerRadius)</label>
+            <input type="number" step="0.1" id="playerRadius">
+          </div>
+        </div>
+        <button class="btn" onclick="saveCharacter()">保存角色参数</button>
+      </div>
+    </div>
+
+    <!-- 地图配置 -->
+    <div id="maps" class="panel">
+      <div class="card">
+        <div class="section-title">
+          <h2>地图列表</h2>
+          <button class="btn" onclick="addMap()">+ 添加地图</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>名称</th>
+              <th>描述</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="mapTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 游戏模式 -->
+    <div id="modes" class="panel">
+      <div class="card">
+        <div class="section-title">
+          <h2>游戏模式</h2>
+          <button class="btn" onclick="addMode()">+ 添加模式</button>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>名称</th>
+              <th>描述</th>
+              <th>最大人数</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="modeTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- 武器编辑弹窗 -->
+  <div id="weaponModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="weaponModalTitle">编辑武器</h2>
+        <button class="close-btn" onclick="closeWeaponModal()">×</button>
+      </div>
+      <div id="weaponForm"></div>
+    </div>
+  </div>
+
+  <script>
+    let config = null;
+    const API = '/api/config';
+
+    async function loadConfig() {
+      try {
+        const res = await fetch(`${API}/all`);
+        config = await res.json();
+        renderWeapons();
+        renderCharacter();
+        renderMaps();
+        renderModes();
+        showStatus('配置加载成功', 'ok');
+      } catch (e) {
+        showStatus('加载失败: ' + e.message, 'err');
+      }
+    }
+
+    function showPanel(id) {
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+      event.target.classList.add('active');
+    }
+
+    function renderWeapons() {
+      const tbody = document.getElementById('weaponTable');
+      tbody.innerHTML = config.weapons.map(w => `
+        <tr>
+          <td>${w.name}</td>
+          <td>${w.type}</td>
+          <td><input type="number" value="${w.damage}" onchange="updateWeapon('${w.id}', 'damage', this.value)"></td>
+          <td><input type="number" value="${w.fireRate}" onchange="updateWeapon('${w.id}', 'fireRate', this.value)"></td>
+          <td><input type="number" value="${w.magSize}" onchange="updateWeapon('${w.id}', 'magSize', this.value)"></td>
+          <td><input type="number" value="${w.price}" onchange="updateWeapon('${w.id}', 'price', this.value)"></td>
+          <td><button class="btn btn-secondary" onclick="editWeapon('${w.id}')">编辑</button></td>
+        </tr>
+      `).join('');
+    }
+
+    function renderCharacter() {
+      const c = config.character;
+      document.getElementById('moveKnifeSpeed').value = c.moveKnifeSpeed;
+      document.getElementById('sprintMultiplier').value = c.sprintMultiplier;
+      document.getElementById('jumpForce').value = c.jumpForce;
+      document.getElementById('gravity').value = c.gravity;
+      document.getElementById('playerHeight').value = c.playerHeight;
+      document.getElementById('playerRadius').value = c.playerRadius;
+    }
+
+    function renderMaps() {
+      const tbody = document.getElementById('mapTable');
+      tbody.innerHTML = config.maps.map(m => `
+        <tr>
+          <td>${m.id}</td>
+          <td>${m.name}</td>
+          <td>${m.description || ''}</td>
+          <td class="${m.isActive ? 'status-ok' : 'status-err'}">${m.isActive ? '启用' : '禁用'}</td>
+          <td>
+            <button class="btn btn-secondary" onclick="toggleMap('${m.id}')">${m.isActive ? '禁用' : '启用'}</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function renderModes() {
+      const tbody = document.getElementById('modeTable');
+      tbody.innerHTML = config.gameModes.map(m => `
+        <tr>
+          <td>${m.id}</td>
+          <td>${m.name}</td>
+          <td>${m.description || ''}</td>
+          <td>${m.maxPlayers}</td>
+          <td><button class="btn btn-secondary" onclick="deleteMode('${m.id}')">删除</button></td>
+        </tr>
+      `).join('');
+    }
+
+    async function updateWeapon(id, field, value) {
+      try {
+        await fetch(`${API}/weapons/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [field]: parseFloat(value) })
+        });
+        showStatus('已更新', 'ok');
+      } catch (e) {
+        showStatus('更新失败', 'err');
+      }
+    }
+
+    async function saveCharacter() {
+      const data = {
+        moveKnifeSpeed: parseFloat(document.getElementById('moveKnifeSpeed').value),
+        sprintMultiplier: parseFloat(document.getElementById('sprintMultiplier').value),
+        jumpForce: parseFloat(document.getElementById('jumpForce').value),
+        gravity: parseFloat(document.getElementById('gravity').value),
+        playerHeight: parseFloat(document.getElementById('playerHeight').value),
+        playerRadius: parseFloat(document.getElementById('playerRadius').value)
+      };
+      try {
+        await fetch(`${API}/character`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        showStatus('角色参数已保存', 'ok');
+      } catch (e) {
+        showStatus('保存失败', 'err');
+      }
+    }
+
+    function editWeapon(id) {
+      const w = config.weapons.find(x => x.id === id);
+      const fields = [
+        'name', 'type', 'damage', 'fireRate', 'bulletSpeed', 'magSize', 'reserve',
+        'reloadTime', 'maxSpeedU', 'price', 'rangeSU', 'rangeModifier', 'headMult',
+        'armorPenetration', 'inaccuracyStand', 'inaccuracyMove', 'inaccuracyMax'
+      ];
+      document.getElementById('weaponForm').innerHTML = fields.map(f => `
+        <div class="form-group">
+          <label>${f}</label>
+          <input type="${f.includes('type') || f.includes('name') ? 'text' : 'number'}" 
+                 id="wf_${f}" value="${w[f] || ''}">
+        </div>
+      `).join('') + `<br><button class="btn" onclick="saveWeapon('${id}')">保存</button>`;
+      document.getElementById('weaponModal').classList.add('active');
+    }
+
+    async function saveWeapon(id) {
+      const fields = ['name', 'type', 'damage', 'fireRate', 'bulletSpeed', 'magSize', 'reserve',
+        'reloadTime', 'maxSpeedU', 'price', 'rangeSU', 'rangeModifier', 'headMult',
+        'armorPenetration', 'inaccuracyStand', 'inaccuracyMove', 'inaccuracyMax'];
+      const data = {};
+      fields.forEach(f => {
+        const v = document.getElementById('wf_' + f).value;
+        data[f] = f === 'name' || f === 'type' ? v : parseFloat(v);
+      });
+      await fetch(`${API}/weapons/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+      closeWeaponModal();
+      loadConfig();
+    }
+
+    function closeWeaponModal() {
+      document.getElementById('weaponModal').classList.remove('active');
+    }
+
+    function openWeaponModal() {
+      document.getElementById('weaponModalTitle').textContent = '添加武器';
+      document.getElementById('weaponForm').innerHTML = '<p style="color:#888">请在数据库中添加</p>';
+      document.getElementById('weaponModal').classList.add('active');
+    }
+
+    function showStatus(msg, type) {
+      console.log(`[${type}] ${msg}`);
+      alert(msg);
+    }
+
+    loadConfig();
+  </script>
+</body>
+</html>
